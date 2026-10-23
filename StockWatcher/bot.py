@@ -157,15 +157,18 @@ async def ping(ctx):
 
 
 @bot.command()
-async def add(ctx, ticker: str, amount: float, price: float):
-    """!add AAPL 500 172.30 (total paid in €, price per share in €)"""
-    if amount <= 0 or price <= 0:
+async def add(ctx, ticker: str, amount_eur: float, price_eur: float):
+    """!add AAPL 75 309.12  (total paid in €, price per share in €)"""
+    if amount_eur <= 0 or price_eur <= 0:
         await ctx.send("❌ Amount and price must be positive.")
         return
-    shares = amount / price
-    await asyncio.to_thread(portfolio.add_holding, ticker, shares, price)
+
+    # Shares = Total EUR Paid / EUR Price Per Share
+    shares = amount_eur / price_eur
+
+    await asyncio.to_thread(portfolio.add_holding, ticker, shares, price_eur)
     await ctx.send(
-        f"✅ Added **{ticker.upper()}**: {amount:.2f} € paid at {price:.2f} € per share "
+        f"✅ Added **{ticker.upper()}**: {amount_eur:.2f} € paid at {price_eur:.2f} €/share "
         f"= {shares:.4f} shares"
     )
 
@@ -184,12 +187,14 @@ async def remove(ctx, ticker: str, shares: float = None):
 
 @bot.command(name="portfolio")
 async def show_portfolio(ctx):
-    """Display portfolio holdings and profit/loss in EUR."""
+    """Display portfolio holdings and profit/loss strictly in EUR."""
     async with ctx.typing():
         items = await asyncio.to_thread(portfolio.get_portfolio)
 
     if not items:
-        await ctx.send("Your portfolio is empty. Add a position with `!add AAPL 75 309.12`.")
+        await ctx.send(
+            "Your portfolio is empty. Add a position with `!add AAPL 75 309.12`."
+        )
         return
 
     embed = discord.Embed(title="📊 Portfolio (EUR)")
@@ -197,12 +202,15 @@ async def show_portfolio(ctx):
 
     for it in items:
         if it["price"] is None:
-            embed.add_field(name=f"⚠️ {it['ticker']}", value=it["error"][:200], inline=False)
+            embed.add_field(
+                name=f"⚠️ {it['ticker']}", value=it["error"][:200], inline=False
+            )
             continue
 
         total_value += it["value"]
         total_cost += it["cost"]
         icon = "🟢" if it["pl"] >= 0 else "🔴"
+
         embed.add_field(
             name=f"{icon} {it['ticker']}   {it['pl']:+.2f} € ({it['pl_pct']:+.2f}%)",
             value=(
@@ -215,7 +223,9 @@ async def show_portfolio(ctx):
 
     if total_cost > 0:
         pl = total_value - total_cost
-        embed.color = discord.Color.green() if pl >= 0 else discord.Color.red()
+        embed.color = (
+            discord.Color.green() if pl >= 0 else discord.Color.red()
+        )
         embed.add_field(
             name="Total",
             value=(

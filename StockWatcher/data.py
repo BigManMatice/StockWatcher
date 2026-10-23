@@ -3,6 +3,7 @@ from contextlib import closing
 from datetime import date
 import pandas as pd
 import requests
+import yfinance as yf
 import config
 
 
@@ -39,7 +40,7 @@ def init_db():
         )
 
 
-# --- FMP (USD/EUR Rate) ---
+# --- FX RATES (USD -> EUR) ---
 
 
 def get_usd_eur() -> float:
@@ -55,23 +56,22 @@ def get_usd_eur() -> float:
     if row and row[1] == today:
         return row[0]
 
-    url = f"https://financialmodelingprep.com/api/v3/quote/EURUSD?apikey={config.FMP_KEY}"
-
+    # Primary: yfinance EUR/USD
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if not data or not isinstance(data, list):
-            raise DataError("FMP returned invalid FX data.")
-
-        eur_usd_rate = float(data[0]["price"])
-        usd_eur_rate = 1.0 / eur_usd_rate
-
+        eurusd = yf.Ticker("EURUSD=X").fast_info["lastPrice"]
+        usd_eur_rate = 1.0 / float(eurusd)
     except Exception:
-        if row:  # Fallback to last saved rate if API fails
-            return row[0]
-        usd_eur_rate = 0.89  # Default safe fallback rate
+        # Fallback: FMP API
+        try:
+            url = f"https://financialmodelingprep.com/api/v3/quote/EURUSD?apikey={config.FMP_KEY}"
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            usd_eur_rate = 1.0 / float(data[0]["price"])
+        except Exception:
+            if row:
+                return row[0]
+            usd_eur_rate = 0.89  # Default fallback rate
 
     with closing(_connect()) as conn, conn:
         conn.execute(
@@ -82,11 +82,32 @@ def get_usd_eur() -> float:
     return usd_eur_rate
 
 
-# --- QUOTE FETCHING (Finnhub with FMP Fallback) ---
+# --- QUOTE FETCHING PROVIDERS ---
+
+
+def _fetch_yfinance_quote(ticker: str) -> dict:
+    """Fetch live price directly via Yahoo Finance (native European ETF support)."""
+    stock = yf.Ticker(ticker)
+    info = stock.fast_info
+
+    price = float(info.get("lastPrice", 0) or 0)
+    prev_close = float(info.get("previousClose", price) or price)
+
+    if price == 0:
+        raise DataError(f"yfinance returned zero price for '{ticker}'")
+
+    pct_change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+
+    return {
+        "ticker": ticker,
+        "price": price,
+        "prev_close": prev_close,
+        "pct_change": pct_change,
+    }
 
 
 def _fetch_fmp_quote(ticker: str) -> dict:
-    """Fallback: Fetch current price from Financial Modeling Prep."""
+    """Fetch current price from Financial Modeling Prep."""
     url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={config.FMP_KEY}"
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
@@ -113,36 +134,62 @@ def _fetch_fmp_quote(ticker: str) -> dict:
 
 
 def get_finnhub_quote(ticker: str) -> dict:
-    """Fetch real-time price from Finnhub, falling back automatically to FMP if Finnhub fails."""
+    """Multi-provider quote fetcher: yfinance (for EU tickers) -> Finnhub -> FMP -> yfinance."""
     ticker = ticker.upper().strip()
-    url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={config.FINNHUB_KEY}"
+    quote_data = None
 
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        res = resp.json()
+    is_european = any(
+        ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
+    )
 
-        price = float(res.get("c", 0))
-        prev_close = float(res.get("pc", 0))
+    # 1. European tickers query yfinance directly first
+    if is_european:
+        try:
+            quote_data = _fetch_yfinance_quote(ticker)
+        except Exception:
+            pass
 
-        # If Finnhub returns 0 (missing symbol/European ETF), try FMP fallback
-        if price == 0:
-            return _fetch_fmp_quote(ticker)
+    # 2. Try Finnhub for standard tickers
+    if not quote_data:
+        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={config.FINNHUB_KEY}"
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            res = resp.json()
 
-        pct_change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+            price = float(res.get("c", 0))
+            prev_close = float(res.get("pc", 0))
 
-        quote_data = {
-            "ticker": ticker,
-            "price": price,
-            "prev_close": prev_close,
-            "pct_change": pct_change,
-        }
+            if price > 0:
+                pct_change = (
+                    ((price - prev_close) / prev_close) * 100
+                    if prev_close > 0
+                    else 0.0
+                )
+                quote_data = {
+                    "ticker": ticker,
+                    "price": price,
+                    "prev_close": prev_close,
+                    "pct_change": pct_change,
+                }
+        except Exception:
+            pass
 
-    except Exception:
-        # Finnhub failed completely -> Use FMP as fallback
-        quote_data = _fetch_fmp_quote(ticker)
+    # 3. Try FMP
+    if not quote_data:
+        try:
+            quote_data = _fetch_fmp_quote(ticker)
+        except Exception:
+            pass
 
-    # Save today's price to local SQLite history
+    # 4. Final fallback to yfinance
+    if not quote_data:
+        try:
+            quote_data = _fetch_yfinance_quote(ticker)
+        except Exception as e:
+            raise DataError(f"Could not fetch quote for '{ticker}': {e}")
+
+    # Save snapshot to SQLite history
     today = date.today().isoformat()
     init_db()
     with closing(_connect()) as conn, conn:
@@ -155,14 +202,10 @@ def get_finnhub_quote(ticker: str) -> dict:
 
 
 def get_daily(ticker: str) -> pd.DataFrame:
-    """Return DataFrame (index=date, column=close in EUR) from local SQLite history.
-
-    Populates today's price automatically using Finnhub/FMP if not yet saved.
-    """
+    """Return DataFrame from local SQLite history."""
     ticker = ticker.upper().strip()
     init_db()
 
-    # Trigger quote fetch to store/update today's price locally
     try:
         get_finnhub_quote(ticker)
     except DataError:
@@ -180,11 +223,12 @@ def get_daily(ticker: str) -> pd.DataFrame:
     if df.empty:
         raise DataError(f"No price history found in database for '{ticker}'.")
 
-    # If European ticker with suffix (.DE, .LS, .AS, .L), price is ALREADY in EUR
-    is_european_ticker = any(ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"])
+    # If US stock (no European suffix), convert USD to EUR
+    is_european = any(
+        ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
+    )
 
-    if not is_european_ticker:
-        # Convert US USD stock price to EUR
+    if not is_european:
         eur_rate = get_usd_eur()
         df["close"] = df["close"] * eur_rate
 
