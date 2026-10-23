@@ -108,3 +108,40 @@ def needs_fetch(ticker):
             "SELECT fetched_on FROM fetch_log WHERE ticker = ?", (ticker,)
         ).fetchone()
     return not row or row[0] != date.today().isoformat()
+
+def get_usd_eur():
+    """USD->EUR rate, cached once per day (costs 1 API call)."""
+    init_db()
+    today = date.today().isoformat()
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fx "
+            "(pair TEXT PRIMARY KEY, rate REAL NOT NULL, fetched_on TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT rate, fetched_on FROM fx WHERE pair = 'USDEUR'"
+        ).fetchone()
+    if row and row[1] == today:
+        return row[0]
+
+    params = {
+        "function": "CURRENCY_EXCHANGE_RATE",
+        "from_currency": "USD",
+        "to_currency": "EUR",
+        "apikey": config.ALPHAVANTAGE_KEY,
+    }
+    try:
+        resp = requests.get(API_URL, params=params, timeout=15)
+        resp.raise_for_status()
+        rate = float(resp.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        if row:  # fall back to the last known rate
+            return row[0]
+        raise DataError(f"Could not get USD/EUR rate: {e}")
+
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO fx (pair, rate, fetched_on) VALUES ('USDEUR', ?, ?)",
+            (rate, today),
+        )
+    return rate

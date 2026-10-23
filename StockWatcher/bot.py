@@ -75,29 +75,40 @@ async def show_portfolio(ctx):
         items = await asyncio.to_thread(portfolio.get_portfolio)
 
     if not items:
-        await ctx.send("Your portfolio is empty. Add a position with `!add AAPL 5 172.30`.")
+        await ctx.send("Your portfolio is empty. Add a position with `!add AAPL 75 309.12`.")
         return
 
-    lines = []
+    embed = discord.Embed(title="📊 Portfolio (EUR)")
     total_value = total_cost = 0.0
     for it in items:
         if it["price"] is None:
-            lines.append(f"{it['ticker']:<6} ⚠️ {it['error']}")
+            embed.add_field(name=f"⚠️ {it['ticker']}", value=it["error"][:200], inline=False)
             continue
         total_value += it["value"]
         total_cost += it["cost"]
-        lines.append(
-            f"{it['ticker']:<6} {it['shares']:g} sh  "
-            f"{it['buy_price']:.2f} -> {it['price']:.2f}  "
-            f"{it['value']:>9.2f}  {it['pl']:+.2f} ({it['pl_pct']:+.1f}%)"
+        icon = "🟢" if it["pl"] >= 0 else "🔴"
+        embed.add_field(
+            name=f"{icon} {it['ticker']}   {it['pl']:+.2f} € ({it['pl_pct']:+.2f}%)",
+            value=(
+                f"{it['shares']:.4f} shares\n"
+                f"Bought at {it['buy_price']:.2f} → now {it['price']:.2f}\n"
+                f"Value **{it['value']:.2f} €** (paid {it['cost']:.2f} €)"
+            ),
+            inline=False,
         )
 
     if total_cost > 0:
         pl = total_value - total_cost
-        lines.append("-" * 40)
-        lines.append(f"TOTAL  value {total_value:.2f}  P/L {pl:+.2f} ({pl / total_cost * 100:+.1f}%)")
-
-    await ctx.send("```\n" + "\n".join(lines) + "\n```")
+        embed.color = discord.Color.green() if pl >= 0 else discord.Color.red()
+        embed.add_field(
+            name="Total",
+            value=(
+                f"Value **{total_value:.2f} €**  ·  paid {total_cost:.2f} €\n"
+                f"Profit/loss **{pl:+.2f} €** ({pl / total_cost * 100:+.2f}%)"
+            ),
+            inline=False,
+        )
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def check(ctx, ticker: str):

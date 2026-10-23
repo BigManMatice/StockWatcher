@@ -63,18 +63,26 @@ def remove_holding(ticker, shares=None):
 
 
 def get_portfolio():
-    """Return a list of dicts with value and profit/loss per holding."""
+    """Holdings with value and profit/loss in EUR. Buy prices are entered in EUR."""
     init_portfolio_db()
     with closing(data._connect()) as conn:
         rows = conn.execute(
             "SELECT ticker, shares, buy_price FROM holdings ORDER BY ticker"
         ).fetchall()
 
+    try:
+        fx = data.get_usd_eur()
+    except data.DataError as e:
+        return [
+            {"ticker": t, "shares": s, "buy_price": b, "price": None, "error": str(e)}
+            for t, s, b in rows
+        ]
+
     result = []
     for ticker, shares, buy_price in rows:
         item = {"ticker": ticker, "shares": shares, "buy_price": buy_price}
         try:
-            price = float(data.get_daily(ticker)["close"].iloc[-1])
+            price = float(data.get_daily(ticker)["close"].iloc[-1]) * fx
         except data.DataError as e:
             item.update(price=None, error=str(e))
             result.append(item)
