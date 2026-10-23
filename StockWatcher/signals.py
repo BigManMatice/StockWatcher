@@ -72,3 +72,44 @@ def analyze(df):
         "rsi": r,
         "reasons": reasons,
     }
+# signals.py
+import data
+from stockName import get_mapped_ticker, get_display_name
+
+def analyze_ticker(ticker: str) -> dict:
+    """
+    Analyzes a given stock/ETF ticker using historical price data.
+    Returns technical signals (Simple Moving Averages, trends).
+    """
+    # 1. Map input to API ticker (e.g. AAPL -> APC.DE)
+    api_ticker = get_mapped_ticker(ticker)
+    display_name = get_display_name(ticker)
+
+    try:
+        # Fetch current quote
+        quote = data.get_finnhub_quote(ticker)
+        price = quote["price"]
+        pct_change = quote["pct_change"]
+
+        # Fetch daily history from SQLite / yfinance
+        df = data.get_daily(ticker)
+
+        if len(df) < 20:
+            signal_text = "NEUTRAL (Insufficient historical data for SMA)"
+        else:
+            sma_20 = df["close"].tail(20).mean()
+            if price > sma_20:
+                signal_text = f"BULLISH (Price €{price:.2f} above 20-day SMA €{sma_20:.2f})"
+            else:
+                signal_text = f"BEARISH (Price €{price:.2f} below 20-day SMA €{sma_20:.2f})"
+
+        return {
+            "ticker": ticker,
+            "display_name": display_name,
+            "price": price,
+            "pct_change": pct_change,
+            "signal": signal_text,
+        }
+
+    except Exception as e:
+        raise RuntimeError(f"Error processing {ticker}: {e}")

@@ -6,6 +6,8 @@ import alerts
 import config
 import data
 import portfolio
+import signals
+from stockName import get_display_name, get_mapped_ticker
 
 # 1. Bot Initialization
 intents = discord.Intents.default()
@@ -31,71 +33,73 @@ alerted_state = {}
 
 # --- BACKGROUND 1-MINUTE MARKET SCANNER ---
 
+import asyncio
+import traceback
+import discord
+from discord.ext import commands, tasks
+
+import config
+import data
+from stockName import get_display_name
+
+LOG_CHANNEL_ID = getattr(config, "LOG_CHANNEL_ID", None)
+
 
 @tasks.loop(minutes=1)
 async def minute_market_scanner():
-    # Only run Monday through Friday
-    if datetime.now().weekday() >= 5:
-        return
+    try:
+        if not LOG_CHANNEL_ID:
+            return
 
-    watchlist = alerts.get_watchlist()
-    if not watchlist:
-        return
+        channel = bot.get_channel(LOG_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(LOG_CHANNEL_ID)
+            except Exception as e:
+                print(f"[Logger Warning] Could not find channel: {e}")
+                return
 
-    log_channel = bot.get_channel(LOG_CHANNEL_ID) if LOG_CHANNEL_ID else None
-    alert_channel = bot.get_channel(ALERT_CHANNEL_ID) if ALERT_CHANNEL_ID else None
+        # Fetch watchlist items (replace with DB lookup if needed)
+        watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
 
-    for ticker in watchlist:
-        try:
-            # Fetch quote and log to local SQLite database
-            quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
-            pct = quote["pct_change"]
-            price_usd = quote["price"]
+        embed = discord.Embed(
+            title="📈 Watchlist Live Status",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
 
-            eur_rate = await asyncio.to_thread(data.get_usd_eur)
-            price_eur = price_usd * eur_rate
+        for ticker in watchlist_items:
+            display_name = get_display_name(ticker)
+            try:
+                quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
+                price = quote["price"]
+                pct = quote["pct_change"]
+                icon = "🟢" if pct >= 0 else "🔴"
 
-            current_alert_type = None
-            if pct >= EXTREME_ALERT_THRESHOLD_PCT:
-                current_alert_type = "PEAK"
-            elif pct <= -EXTREME_ALERT_THRESHOLD_PCT:
-                current_alert_type = "DROP"
+                # inline=False forces each stock onto its own clean, full-width row
+                embed.add_field(
+                    name=f"{icon} {display_name}",
+                    value=f"**€{price:.2f}** · ({pct:+.2f}%)",
+                    inline=False
+                )
+            except Exception as e:
+                embed.add_field(
+                    name=f"⚠️ {display_name}",
+                    value=f"Error: {e}",
+                    inline=False
+                )
 
-            # A. EXTREME MOVEMENT -> Alert Channel (Sends ping ONCE per state change)
-            if current_alert_type:
-                if alerted_state.get(ticker) != current_alert_type:
-                    alerted_state[ticker] = current_alert_type
+        await channel.send(embed=embed)
+        print("[Logger Status] Watchlist minute update sent.")
 
-                    icon = "🚀 **SPIKE / PEAK ALERT**" if current_alert_type == "PEAK" else "🚨 🔻 **CRASH ALERT**"
-                    color = discord.Color.green() if current_alert_type == "PEAK" else discord.Color.red()
+    except Exception as outer_err:
+        print(f"[Logger Outer Error]: {outer_err}")
 
-                    embed = discord.Embed(
-                        title=f"{icon}: {ticker}",
-                        description="Significant intraday movement detected!",
-                        color=color,
-                    )
-                    embed.add_field(name="Current Price", value=f"{price_eur:.2f} € ({price_usd:.2f} USD)", inline=True)
-                    embed.add_field(name="Intraday Change", value=f"{pct:+.2f}%", inline=True)
 
-                    if alert_channel:
-                        await alert_channel.send(content="@here Extreme move detected!", embed=embed)
-
-            else:
-                if ticker in alerted_state:
-                    del alerted_state[ticker]
-
-            # B. MINOR MOVEMENT -> Log Channel
-            if abs(pct) >= MINOR_LOG_THRESHOLD_PCT:
-                if log_channel:
-                    time_str = datetime.now().strftime("%H:%M")
-                    icon = "📈" if pct > 0 else "📉"
-                    await log_channel.send(
-                        f"`[{time_str}]` {icon} **{ticker}**: "
-                        f"{price_eur:.2f} € ({price_usd:.2f} USD) | {pct:+.2f}%"
-                    )
-
-        except Exception as e:
-            print(f"Error scanning {ticker}: {e}")
+@minute_market_scanner.error
+async def minute_market_scanner_error(error):
+    print(f"[Task Error] Unhandled exception in loop: {error}")
+    traceback.print_exc()
 
 
 @minute_market_scanner.before_loop
@@ -103,14 +107,13 @@ async def before_scanner():
     await bot.wait_until_ready()
 
 
-# --- BOT EVENTS ---
-
-
 @bot.event
 async def on_ready():
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
     if not minute_market_scanner.is_running():
         minute_market_scanner.start()
-    print(f"Logged in as {bot.user}")
+
+
 
 
 # --- BOT COMMANDS ---
@@ -273,25 +276,30 @@ async def watchlist(ctx):
         await ctx.send(f"📋 **Watchlist**: {', '.join(tickers)}")
 
 
-@bot.command()
-async def scan(ctx):
-    """Run manual signal check across watchlist."""
+@bot.command(name="scan")
+async def scan_watchlist(ctx):
+    """Scans all tickers in the watchlist for technical signals."""
+    watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"] # or fetch from DB
+
     async with ctx.typing():
-        buy_alerts, sell_alerts, errors = await asyncio.to_thread(alerts.scan)
+        embed = discord.Embed(title="🔍 Technical Signal Scan (EUR)")
 
-    if not buy_alerts and not sell_alerts and not errors:
-        await ctx.send("No signals triggered.")
-        return
+        for ticker in watchlist_items:
+            try:
+                res = signals.analyze_ticker(ticker)
+                embed.add_field(
+                    name=f"{res['display_name']} — €{res['price']:.2f} ({res['pct_change']:+.2f}%)",
+                    value=f"**Signal:** {res['signal']}",
+                    inline=False
+                )
+            except Exception as e:
+                embed.add_field(
+                    name=f"⚠️ {get_display_name(ticker)}",
+                    value=f"Error scanning: {e}",
+                    inline=False
+                )
 
-    msg = []
-    for b in buy_alerts:
-        msg.append(f"🟢 **BUY SIGNAL**: {b['ticker']} at {b['price']:.2f} €")
-    for s in sell_alerts:
-        msg.append(f"🔴 **SELL SIGNAL**: {s['ticker']} at {s['price']:.2f} €")
-    for err_ticker, err_msg in errors:
-        msg.append(f"⚠️ Error checking **{err_ticker}**: {err_msg[:100]}")
-
-    await ctx.send("\n".join(msg))
+        await ctx.send(embed=embed)
 
 
 # --- RUN BOT ---

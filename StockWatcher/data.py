@@ -183,16 +183,12 @@ def get_finnhub_quote(ticker: str) -> dict:
 
 
 def get_daily(ticker: str) -> pd.DataFrame:
-    """Return DataFrame from local SQLite history."""
+    """Return DataFrame from local SQLite history, automatically backfilling 1y history via yfinance if needed."""
     ticker = ticker.upper().strip()
     api_ticker = get_mapped_ticker(ticker)
     init_db()
 
-    try:
-        get_finnhub_quote(ticker)
-    except DataError:
-        pass
-
+    # 1. Query local SQLite database
     with closing(_connect()) as conn:
         df = pd.read_sql_query(
             "SELECT date, close FROM prices WHERE ticker = ? ORDER BY date",
@@ -202,12 +198,44 @@ def get_daily(ticker: str) -> pd.DataFrame:
             index_col="date",
         )
 
+    # 2. Backfill 1 year of daily history if database has fewer than 20 rows
+    if len(df) < 20:
+        try:
+            stock = yf.Ticker(api_ticker)
+            hist = stock.history(period="1y")
+
+            if not hist.empty:
+                records = []
+                for dt, row in hist.iterrows():
+                    d_str = dt.strftime("%Y-%m-%d")
+                    records.append((ticker, d_str, float(row["Close"])))
+
+                # Batch insert missing historical snapshots
+                with closing(_connect()) as conn, conn:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO prices (ticker, date, close) VALUES (?, ?, ?)",
+                        records,
+                    )
+
+                # Re-query SQLite to get the updated history
+                with closing(_connect()) as conn:
+                    df = pd.read_sql_query(
+                        "SELECT date, close FROM prices WHERE ticker = ? ORDER BY date",
+                        conn,
+                        params=(ticker,),
+                        parse_dates=["date"],
+                        index_col="date",
+                    )
+        except Exception as e:
+            print(f"[History Backfill Error] Could not backfill '{ticker}': {e}")
+
     if df.empty:
         raise DataError(f"No price history found in database for '{ticker}'.")
 
-    # If US stock (no European suffix), convert USD to EUR
+    # 3. Convert USD to EUR if this is a standard US ticker (no European suffix)
     is_european = any(
-        api_ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
+        api_ticker.endswith(ext)
+        for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
     )
 
     if not is_european:
