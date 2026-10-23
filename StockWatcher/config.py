@@ -28,7 +28,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY")
 FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 FMP_KEY = os.getenv("FMP_KEY")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "0"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 
 if not DISCORD_TOKEN or not ALPHAVANTAGE_KEY:
     raise RuntimeError("Missing DISCORD_TOKEN or ALPHAVANTAGE_KEY in .env")
