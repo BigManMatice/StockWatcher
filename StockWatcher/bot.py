@@ -1,7 +1,10 @@
+# bot.py
 import asyncio
 from datetime import datetime
+import traceback
 import discord
 from discord.ext import commands, tasks
+
 import alerts
 import config
 import data
@@ -14,8 +17,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# 2. Channel IDs loaded dynamically from .env via config.py
-# (Falls back to int conversion from config, defaults to None if missing)
+# 2. Channel IDs loaded dynamically from config.py
 LOG_CHANNEL_ID = getattr(config, "LOG_CHANNEL_ID", None)
 ALERT_CHANNEL_ID = getattr(config, "ALERT_CHANNEL_ID", None)
 
@@ -24,26 +26,53 @@ if LOG_CHANNEL_ID:
 if ALERT_CHANNEL_ID:
     ALERT_CHANNEL_ID = int(ALERT_CHANNEL_ID)
 
-MINOR_LOG_THRESHOLD_PCT = 1.0
-EXTREME_ALERT_THRESHOLD_PCT = 3.0
+# Dynamic threshold variable (default 2.0%)
+SPIKE_THRESHOLD_PCT = 2.0
 
-# In-memory tracking to avoid repeating the same extreme alert every minute
-alerted_state = {}
+# In-memory tracking for previous prices
+last_prices = {}
+
+
+# --- COMMANDS TO CHANGE & VIEW THRESHOLD ---
+
+@bot.command(name="setalert")
+@commands.has_permissions(administrator=True)  # Optional: restricts usage to admins
+async def set_alert_threshold(ctx, percentage: float):
+    """Dynamically set the price spike alert percentage threshold."""
+    global SPIKE_THRESHOLD_PCT
+    if percentage <= 0:
+        await ctx.send("⚠️ Threshold percentage must be greater than 0.")
+        return
+
+    SPIKE_THRESHOLD_PCT = percentage
+    embed = discord.Embed(
+        title="⚙️ Alert Threshold Updated",
+        description=f"Price spike alerts will now trigger on moves of **±{SPIKE_THRESHOLD_PCT}%** or higher.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    await ctx.send(embed=embed)
+
+@set_alert_threshold.error
+async def set_alert_threshold_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("⚠️ Please specify a percentage. Example: `!setalert 1.5`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("⚠️ Please provide a valid number. Example: `!setalert 2.5`")
+
+
+@bot.command(name="threshold")
+async def view_alert_threshold(ctx):
+    """Display the current alert threshold percentage."""
+    embed = discord.Embed(
+        title="📊 Current Alert Settings",
+        description=f"Spike Alert Threshold: **±{SPIKE_THRESHOLD_PCT}%**",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
 
 
 # --- BACKGROUND 1-MINUTE MARKET SCANNER ---
-
-import asyncio
-import traceback
-import discord
-from discord.ext import commands, tasks
-
-import config
-import data
-from stockName import get_display_name
-
-LOG_CHANNEL_ID = getattr(config, "LOG_CHANNEL_ID", None)
-
 
 @tasks.loop(minutes=1)
 async def minute_market_scanner():
@@ -51,15 +80,21 @@ async def minute_market_scanner():
         if not LOG_CHANNEL_ID:
             return
 
-        channel = bot.get_channel(LOG_CHANNEL_ID)
-        if not channel:
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
             try:
-                channel = await bot.fetch_channel(LOG_CHANNEL_ID)
+                log_channel = await bot.fetch_channel(LOG_CHANNEL_ID)
             except Exception as e:
-                print(f"[Logger Warning] Could not find channel: {e}")
+                print(f"[Logger Warning] Could not find log channel: {e}")
                 return
 
-        # Fetch watchlist items (replace with DB lookup if needed)
+        alert_channel = None
+        if ALERT_CHANNEL_ID:
+            try:
+                alert_channel = bot.get_channel(ALERT_CHANNEL_ID) or await bot.fetch_channel(ALERT_CHANNEL_ID)
+            except Exception as e:
+                print(f"[Alert Warning] Could not find alert channel: {e}")
+
         watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
 
         embed = discord.Embed(
@@ -76,7 +111,27 @@ async def minute_market_scanner():
                 pct = quote["pct_change"]
                 icon = "🟢" if pct >= 0 else "🔴"
 
-                # inline=False forces each stock onto its own clean, full-width row
+                # Check for rapid minute-by-minute price spikes using dynamic SPIKE_THRESHOLD_PCT
+                if ticker in last_prices and alert_channel:
+                    prev_price = last_prices[ticker]
+                    spike_pct = ((price - prev_price) / prev_price) * 100
+
+                    if abs(spike_pct) >= SPIKE_THRESHOLD_PCT:
+                        alert_icon = "🚀" if spike_pct > 0 else "💥"
+                        alert_embed = discord.Embed(
+                            title=f"{alert_icon} Price Spike Alert! (Threshold: ±{SPIKE_THRESHOLD_PCT}%)",
+                            description=(
+                                f"**{display_name}** moved **{spike_pct:+.2f}%** in the last minute!\n"
+                                f"• **Previous Price:** €{prev_price:.2f}\n"
+                                f"• **Current Price:** €{price:.2f}"
+                            ),
+                            color=discord.Color.gold() if spike_pct > 0 else discord.Color.dark_red(),
+                            timestamp=discord.utils.utcnow()
+                        )
+                        await alert_channel.send(embed=alert_embed)
+
+                last_prices[ticker] = price
+
                 embed.add_field(
                     name=f"{icon} {display_name}",
                     value=f"**€{price:.2f}** · ({pct:+.2f}%)",
@@ -89,7 +144,7 @@ async def minute_market_scanner():
                     inline=False
                 )
 
-        await channel.send(embed=embed)
+        await log_channel.send(embed=embed)
         print("[Logger Status] Watchlist minute update sent.")
 
     except Exception as outer_err:
@@ -122,34 +177,56 @@ async def on_ready():
 @bot.command(name="help")
 async def help_cmd(ctx):
     """Show all commands"""
-    embed = discord.Embed(title="📈 StockWatcher Commands", color=discord.Color.green())
+    embed = discord.Embed(
+        title="📈 StockWatcher Commands", 
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+
     embed.add_field(
         name="Portfolio",
         value=(
-            "`!add AAPL 500 172.30` add position (total paid in €, price per share in €)\n"
-            "`!remove AAPL` remove whole position\n"
-            "`!remove AAPL 2` remove 2 shares\n"
-            "`!portfolio` show total value and P/L in €"
+            "`!add AAPL 500 172.30` — Add position (total paid in €, price per share in €)\n"
+            "`!remove AAPL` — Remove whole position\n"
+            "`!remove AAPL 2` — Remove 2 shares\n"
+            "`!portfolio` — Show total value and P/L in €"
         ),
         inline=False,
     )
+
     embed.add_field(
-        name="Signals",
-        value="`!check TSLA` show price & indicators for a ticker",
-        inline=False,
-    )
-    embed.add_field(
-        name="Watchlist & Alerts",
+        name="Watchlist & Scanning",
         value=(
-            "`!watch MSFT` add ticker to active scanner\n"
-            "`!unwatch MSFT` remove ticker from active scanner\n"
-            "`!watchlist` show monitored tickers\n"
-            "`!scan` run signal scan manually"
+            "`!watch MSFT` — Add ticker to active scanner\n"
+            "`!unwatch MSFT` — Remove ticker from active scanner\n"
+            "`!watchlist` — Show monitored tickers\n"
+            "`!scan` — Run signal scan manually across watchlist"
         ),
         inline=False,
     )
-    embed.add_field(name="Other", value="`!ping` check if bot is online", inline=False)
-    embed.set_footer(text="Signals are prompts to look closer, not financial advice.")
+
+    embed.add_field(
+        name="Signals & Analysis",
+        value="`!check TSLA` — Show live price & indicators for a ticker",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Alert Configuration",
+        value=(
+            "`!threshold` — View the current price spike alert percentage\n"
+            "`!setalert <percent>` — Set spike alert sensitivity (e.g. `!setalert 1.5`)"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Other", 
+        value="`!ping` — Check if bot is online", 
+        inline=False
+    )
+
+    embed.set_footer(text="Signals are prompts to look closer, not financial advice. • All prices in EUR")
     await ctx.send(embed=embed)
 
 
