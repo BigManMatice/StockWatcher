@@ -98,3 +98,13 @@ def get_daily(ticker):
             index_col="date",
         )
     return df
+
+def needs_fetch(ticker):
+    """True if get_daily() would call the API for this ticker."""
+    ticker = ticker.upper().strip()
+    init_db()
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT fetched_on FROM fetch_log WHERE ticker = ?", (ticker,)
+        ).fetchone()
+    return not row or row[0] != date.today().isoformat()
