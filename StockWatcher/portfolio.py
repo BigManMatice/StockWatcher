@@ -70,19 +70,12 @@ def get_portfolio():
             "SELECT ticker, shares, buy_price FROM holdings ORDER BY ticker"
         ).fetchall()
 
-    try:
-        fx = data.get_usd_eur()
-    except data.DataError as e:
-        return [
-            {"ticker": t, "shares": s, "buy_price": b, "price": None, "error": str(e)}
-            for t, s, b in rows
-        ]
-
     result = []
     for ticker, shares, buy_price in rows:
         item = {"ticker": ticker, "shares": shares, "buy_price": buy_price}
         try:
-            price = float(data.get_daily(ticker)["close"].iloc[-1]) * fx
+            # data.get_daily() now outputs directly in EUR
+            price = float(data.get_daily(ticker)["close"].iloc[-1])
         except data.DataError as e:
             item.update(price=None, error=str(e))
             result.append(item)
@@ -95,7 +88,7 @@ def get_portfolio():
             value=value,
             cost=cost,
             pl=value - cost,
-            pl_pct=(value - cost) / cost * 100,
+            pl_pct=(value - cost) / cost * 100 if cost > 0 else 0.0,
         )
         result.append(item)
     return result

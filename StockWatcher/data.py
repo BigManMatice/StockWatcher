@@ -66,8 +66,9 @@ def _fetch_from_api(ticker):
 
 
 def get_daily(ticker):
-    """Return a DataFrame (index=date, column=close) for the ticker.
-    Only calls the API if we haven't fetched this ticker today."""
+    """Return a DataFrame (index=date, column=close in EUR) for the ticker.
+    Only calls the API if we haven't fetched this ticker today.
+    The DB stores raw USD closes; conversion to EUR happens on the way out."""
     ticker = ticker.upper().strip()
     init_db()
     today = date.today().isoformat()
@@ -97,6 +98,8 @@ def get_daily(ticker):
             parse_dates=["date"],
             index_col="date",
         )
+
+    df["close"] = df["close"] * get_usd_eur()
     return df
 
 def needs_fetch(ticker):
