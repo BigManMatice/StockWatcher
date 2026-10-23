@@ -1,5 +1,4 @@
 from contextlib import closing
-
 import data
 
 
@@ -16,7 +15,9 @@ def init_portfolio_db():
 
 def add_holding(ticker, shares, buy_price):
     """Add a position. If you already hold the ticker, merge them
-    and keep a weighted-average buy price."""
+
+    and keep a weighted-average buy price.
+    """
     ticker = ticker.upper().strip()
     if shares <= 0 or buy_price <= 0:
         raise ValueError("Shares and price must be positive.")
@@ -74,7 +75,7 @@ def get_portfolio():
     for ticker, shares, buy_price in rows:
         item = {"ticker": ticker, "shares": shares, "buy_price": buy_price}
         try:
-            # data.get_daily() now outputs directly in EUR
+            # get_daily() automatically provides current price in EUR from local history/Finnhub
             price = float(data.get_daily(ticker)["close"].iloc[-1])
         except data.DataError as e:
             item.update(price=None, error=str(e))
