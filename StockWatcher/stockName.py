@@ -1,12 +1,17 @@
 # stockName.py
 
 # API Ticker mapping for fetching prices
+# stockName.py
 API_RENAMES = {
+    "MICROSOFT": "MSF.DE",
+    "MSFT": "MSF.DE",
+    "NVIDIA": "NVD.DE",
+    "NVDA": "NVD.DE",
     "AAPL": "APC.DE",
     "S&P500": "CSPX.AS",
-    "CSPX": "CSPX.AS",
-    "SXR8": "SXR8.DE",
 }
+
+
 
 # Display mapping for Discord !portfolio output
 # Maps whatever ticker is in the database to your desired label format
@@ -24,7 +29,6 @@ DISPLAY_NAMES = {
 
 
 def get_mapped_ticker(ticker: str) -> str:
-    """Returns the underlying API lookup symbol."""
     cleaned = ticker.upper().strip()
     return API_RENAMES.get(cleaned, cleaned)
 

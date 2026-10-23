@@ -3,6 +3,10 @@ from logging.handlers import RotatingFileHandler
 
 import config
 from bot import bot
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*inplace keyword.*")
 
 handler = RotatingFileHandler(
     config.LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
