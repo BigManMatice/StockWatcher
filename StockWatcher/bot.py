@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 @bot.event
@@ -44,14 +44,17 @@ async def ping(ctx):
 
 
 @bot.command()
-async def add(ctx, ticker: str, shares: float, price: float):
-    """!add AAPL 5 172.30"""
-    try:
-        await asyncio.to_thread(portfolio.add_holding, ticker, shares, price)
-    except ValueError as e:
-        await ctx.send(f"❌ {e}")
+async def add(ctx, ticker: str, amount: float, price: float):
+    """!add AAPL 500 172.30  (total paid, price per share)"""
+    if amount <= 0 or price <= 0:
+        await ctx.send("❌ Amount and price must be positive.")
         return
-    await ctx.send(f"✅ Added {shares:g} × {ticker.upper()} @ {price:.2f}")
+    shares = amount / price
+    await asyncio.to_thread(portfolio.add_holding, ticker, shares, price)
+    await ctx.send(
+        f"✅ Added {ticker.upper()}: {amount:.2f} paid at {price:.2f} per share "
+        f"= {shares:.4f} shares"
+    )
 
 
 @bot.command()
@@ -180,3 +183,36 @@ async def scan(ctx):
     """Run the scan now, instead of waiting for 23:00."""
     async with ctx.typing():
         await run_scan(ctx.channel, always_reply=True)
+
+@bot.command(name="help")
+async def help_cmd(ctx):
+    """Show all commands"""
+    embed = discord.Embed(title="📈 StonksBot commands", color=discord.Color.green())
+    embed.add_field(
+        name="Portfolio",
+        value=(
+            "`!add AAPL 5 172.30` add a position (ticker, shares, buy price)\n"
+            "`!remove AAPL` remove a whole position\n"
+            "`!remove AAPL 2` remove some shares\n"
+            "`!portfolio` show value and profit/loss"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Signals",
+        value="`!check TSLA` show the buy/sell signal for any ticker",
+        inline=False,
+    )
+    embed.add_field(
+        name="Watchlist & alerts",
+        value=(
+            "`!watch MSFT` add a ticker to the watchlist\n"
+            "`!unwatch MSFT` remove it\n"
+            "`!watchlist` show the watchlist\n"
+            "`!scan` run the scan now (also runs automatically Mon-Fri at 23:00)"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Other", value="`!ping` check that the bot is alive", inline=False)
+    embed.set_footer(text="Signals are prompts to look closer, not financial advice.")
+    await ctx.send(embed=embed)
