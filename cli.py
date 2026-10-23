@@ -1,6 +1,5 @@
 import argparse
 import io
-import os
 import sys
 import threading
 from pathlib import Path
@@ -347,20 +346,31 @@ class DashboardApp(App):
                 except Exception as e:
                     print(f"❌ Check failed for {ticker}: {e}")
 
-        # Scan command
+        # Scan command with Rich terminal markup
         elif cmd == "!scan":
             print("🔍 Running manual signal scan across watchlist...")
             for t in ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]:
                 try:
                     res = signals.analyze_ticker(t)
-                    print(f"-> {t}: {res['verdict']}")
+                    signal_str = res.get("signal") or res.get("verdict", "N/A")
+                    display_n = res.get("display_name") or get_display_name(t)
+                    price = res.get("price", 0.0)
+                    pct = res.get("pct_change", 0.0)
+
+                    # Determine markup colors
+                    if pct >= 0:
+                        color_tag = "green"
+                        circle = "🟢"
+                    else:
+                        color_tag = "red"
+                        circle = "🔴"
+
+                    # Print formatted line with Rich text styling
+                    print(
+                        f"-> {circle} [bold]{display_n:<8}[/bold] (€{price:.2f} | [{color_tag}]{pct:+.2f}%[/{color_tag}]): {signal_str}"
+                    )
                 except Exception as e:
                     print(f"❌ {t} scan failed: {e}")
-
-        else:
-            print(
-                f"⚠️ Command '{cmd}' not recognized. Type `!help` to view valid commands."
-            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_set_threshold":

@@ -4,33 +4,70 @@ import data
 
 def init_portfolio_db():
     with closing(data._connect()) as conn, conn:
-        # Table for holdings
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS holdings (
-                user_id TEXT NOT NULL DEFAULT 'default_user',
-                ticker TEXT NOT NULL,
-                shares REAL NOT NULL,
-                buy_price REAL NOT NULL,
-                PRIMARY KEY (user_id, ticker)
-            )"""
-        )
+        # Check if the existing holdings table has ticker as a single primary key
+        cursor = conn.execute("PRAGMA table_info(holdings)")
+        cols = cursor.fetchall()
 
-        # Table to bridge Discord IDs with Custom Usernames
+        # If table exists, check if 'ticker' is the sole primary key
+        # pk > 0 indicates a primary key column
+        pk_cols = [c[1] for c in cols if c[5] > 0]
+
+        if pk_cols == ["ticker"]:
+            # Migrate table to composite primary key (user_id, ticker)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS holdings_new (
+                    user_id TEXT NOT NULL DEFAULT 'default_user',
+                    ticker TEXT NOT NULL,
+                    shares REAL NOT NULL,
+                    buy_price REAL NOT NULL,
+                    PRIMARY KEY (user_id, ticker)
+                )
+            """
+            )
+
+            # Copy over existing data
+            cursor = conn.execute("PRAGMA table_info(holdings)")
+            existing_col_names = [c[1] for c in cursor.fetchall()]
+
+            if "user_id" in existing_col_names:
+                conn.execute(
+                    """
+                    INSERT INTO holdings_new (user_id, ticker, shares, buy_price)
+                    SELECT user_id, ticker, shares, buy_price FROM holdings
+                """
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO holdings_new (user_id, ticker, shares, buy_price)
+                    SELECT 'default_user', ticker, shares, buy_price FROM holdings
+                """
+                )
+
+            # Drop old table and rename new table
+            conn.execute("DROP TABLE holdings")
+            conn.execute("ALTER TABLE holdings_new RENAME TO holdings")
+
+        else:
+            # Create standard composite table if it doesn't exist
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS holdings (
+                    user_id TEXT NOT NULL DEFAULT 'default_user',
+                    ticker TEXT NOT NULL,
+                    shares REAL NOT NULL,
+                    buy_price REAL NOT NULL,
+                    PRIMARY KEY (user_id, ticker)
+                )"""
+            )
+
+        # Create account_links table for Discord ID mapping
         conn.execute(
             """CREATE TABLE IF NOT EXISTS account_links (
                 custom_username TEXT PRIMARY KEY,
                 discord_id TEXT NOT NULL UNIQUE
             )"""
         )
-
-        # Schema migration check for holdings table
-        cursor = conn.execute("PRAGMA table_info(holdings)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if "user_id" not in columns:
-            conn.execute(
-                "ALTER TABLE holdings ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default_user'"
-            )
-
 
 def link_discord_account(discord_id: str, custom_username: str):
     """Link a Discord user ID to a custom username."""

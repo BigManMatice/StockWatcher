@@ -384,25 +384,43 @@ async def watchlist(ctx):
 
 @bot.command(name="scan")
 async def scan_watchlist(ctx):
-    """Scans all tickers in the watchlist for technical signals."""
+    """Scans all tickers in the watchlist for technical signals with colored embeds."""
     watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
 
     async with ctx.typing():
-        embed = discord.Embed(title="🔍 Technical Signal Scan (EUR)")
+        embed = discord.Embed(
+            title="🔍 Technical Signal Scan (EUR)",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
 
         for ticker in watchlist_items:
             try:
                 res = signals.analyze_ticker(ticker)
-                embed.add_field(
-                    name=f"{res['display_name']} — €{res['price']:.2f} ({res['pct_change']:+.2f}%)",
-                    value=f"**Signal:** {res['signal']}",
-                    inline=False
-                )
+                display_n = res.get("display_name") or get_display_name(ticker)
+                price = res.get("price", 0.0)
+                pct = res.get("pct_change", 0.0)
+                signal_str = res.get("signal") or res.get("verdict", "N/A")
+
+                # Dynamic emoji based on percent change / signal
+                circle = "🟢" if pct >= 0 else "🔴"
+
+                # If display name differs from raw ticker, format as "AAPL (APC.DE)"
+                if display_n != ticker:
+                    label = f"{display_n} ({ticker})"
+                else:
+                    label = ticker
+
+                field_name = f"{circle} {label} — €{price:.2f} ({pct:+.2f}%)"
+                field_value = f"**Signal:** {signal_str}"
+
+                embed.add_field(name=field_name, value=field_value, inline=False)
+
             except Exception as e:
                 embed.add_field(
                     name=f"⚠️ {get_display_name(ticker)}",
                     value=f"Error scanning: {e}",
-                    inline=False
+                    inline=False,
                 )
 
         await ctx.send(embed=embed)
