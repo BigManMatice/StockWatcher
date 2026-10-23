@@ -5,6 +5,8 @@ import discord
 from discord.ext import commands
 
 import portfolio
+import signals
+import data
 
 log = logging.getLogger(__name__)
 
@@ -87,3 +89,25 @@ async def show_portfolio(ctx):
         lines.append(f"TOTAL  value {total_value:.2f}  P/L {pl:+.2f} ({pl / total_cost * 100:+.1f}%)")
 
     await ctx.send("```\n" + "\n".join(lines) + "\n```")
+
+@bot.command()
+async def check(ctx, ticker: str):
+    """!check TSLA"""
+    ticker = ticker.upper()
+    async with ctx.typing():
+        try:
+            df = await asyncio.to_thread(data.get_daily, ticker)
+        except data.DataError as e:
+            await ctx.send(f"❌ {e}")
+            return
+
+    res = signals.analyze(df)
+    icon = {"buy": "🟢", "sell": "🔴", "hold": "⚪"}[res["signal"]]
+    lines = [f"{icon} **{ticker}: {res['signal'].upper()}**  (close {res['price']:.2f})"]
+    if "rsi" in res:
+        lines.append(
+            f"SMA{signals.FAST} {res['sma_fast']:.2f} / SMA{signals.SLOW} {res['sma_slow']:.2f} "
+            f"(trend {res['trend']}), RSI {res['rsi']:.0f}"
+        )
+    lines += [f"• {r}" for r in res["reasons"]]
+    await ctx.send("\n".join(lines))
