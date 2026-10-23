@@ -26,6 +26,8 @@ load_dotenv(ENV_PATH)
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")
+FMP_KEY = os.getenv("FMP_KEY")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 if not DISCORD_TOKEN or not ALPHAVANTAGE_KEY:
