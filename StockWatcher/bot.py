@@ -185,25 +185,36 @@ async def remove(ctx, ticker: str, shares: float = None):
         await ctx.send(f"✅ Removed {shares} shares from **{ticker.upper()}**.")
 
 
+# Map European ticker symbols to clean display names in Discord
+DISPLAY_NAMES = {
+    "APC.DE": "AAPL",
+    "APC.LS": "AAPL",
+    "CSPX.AS": "S&P500",
+    "SXR8.DE": "S&P500",
+    "SXR8.LS": "S&P500",
+}
+
+from stockName import get_display_name
+
 @bot.command(name="portfolio")
 async def show_portfolio(ctx):
-    """Display portfolio holdings and profit/loss strictly in EUR."""
     async with ctx.typing():
         items = await asyncio.to_thread(portfolio.get_portfolio)
 
     if not items:
-        await ctx.send(
-            "Your portfolio is empty. Add a position with `!add AAPL 75 309.12`."
-        )
+        await ctx.send("Your portfolio is empty.")
         return
 
     embed = discord.Embed(title="📊 Portfolio (EUR)")
     total_value = total_cost = 0.0
 
     for it in items:
+        # Translates DB ticker (e.g. 'APC.DE' or 'AAPL') into 'AAPL (APC.DE)'
+        display_label = get_display_name(it["ticker"])
+
         if it["price"] is None:
             embed.add_field(
-                name=f"⚠️ {it['ticker']}", value=it["error"][:200], inline=False
+                name=f"⚠️ {display_label}", value=it["error"][:200], inline=False
             )
             continue
 
@@ -212,7 +223,7 @@ async def show_portfolio(ctx):
         icon = "🟢" if it["pl"] >= 0 else "🔴"
 
         embed.add_field(
-            name=f"{icon} {it['ticker']}   {it['pl']:+.2f} € ({it['pl_pct']:+.2f}%)",
+            name=f"{icon} {display_label}   {it['pl']:+.2f} € ({it['pl_pct']:+.2f}%)",
             value=(
                 f"{it['shares']:.4f} shares\n"
                 f"Bought at {it['buy_price']:.2f} € → now {it['price']:.2f} €\n"

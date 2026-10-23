@@ -6,6 +6,9 @@ import requests
 import yfinance as yf
 import config
 
+# Import mapping function from stockName.py
+from stockName import get_mapped_ticker
+
 
 class DataError(Exception):
     """Custom exception for data fetching errors."""
@@ -133,69 +136,47 @@ def _fetch_fmp_quote(ticker: str) -> dict:
     }
 
 
+# Inside data.py
+from stockName import get_mapped_ticker
+
 def get_finnhub_quote(ticker: str) -> dict:
-    """Multi-provider quote fetcher: yfinance (for EU tickers) -> Finnhub -> FMP -> yfinance."""
-    ticker = ticker.upper().strip()
+    """Fetches Euro quote via yfinance/APIs using mapped ticker, saving as original ticker."""
+    original_ticker = ticker.upper().strip()
+    api_ticker = get_mapped_ticker(original_ticker)
+
     quote_data = None
 
+    # European / Exchange-suffixed tickers query yfinance
     is_european = any(
-        ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
+        api_ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
     )
 
-    # 1. European tickers query yfinance directly first
     if is_european:
         try:
-            quote_data = _fetch_yfinance_quote(ticker)
+            quote_data = _fetch_yfinance_quote(api_ticker)
         except Exception:
             pass
 
-    # 2. Try Finnhub for standard tickers
+    # Fallback to Finnhub / FMP if yfinance fails
     if not quote_data:
-        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={config.FINNHUB_KEY}"
         try:
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            res = resp.json()
-
-            price = float(res.get("c", 0))
-            prev_close = float(res.get("pc", 0))
-
-            if price > 0:
-                pct_change = (
-                    ((price - prev_close) / prev_close) * 100
-                    if prev_close > 0
-                    else 0.0
-                )
-                quote_data = {
-                    "ticker": ticker,
-                    "price": price,
-                    "prev_close": prev_close,
-                    "pct_change": pct_change,
-                }
+            quote_data = _fetch_fmp_quote(api_ticker)
         except Exception:
-            pass
+            try:
+                quote_data = _fetch_yfinance_quote(api_ticker)
+            except Exception as e:
+                raise DataError(f"Could not fetch quote for '{original_ticker}' ({api_ticker}): {e}")
 
-    # 3. Try FMP
-    if not quote_data:
-        try:
-            quote_data = _fetch_fmp_quote(ticker)
-        except Exception:
-            pass
+    # Set ticker key back to standard name (e.g., AAPL)
+    quote_data["ticker"] = original_ticker
 
-    # 4. Final fallback to yfinance
-    if not quote_data:
-        try:
-            quote_data = _fetch_yfinance_quote(ticker)
-        except Exception as e:
-            raise DataError(f"Could not fetch quote for '{ticker}': {e}")
-
-    # Save snapshot to SQLite history
+    # Save snapshot into SQLite under standard name ('AAPL')
     today = date.today().isoformat()
     init_db()
     with closing(_connect()) as conn, conn:
         conn.execute(
             "INSERT OR REPLACE INTO prices (ticker, date, close) VALUES (?, ?, ?)",
-            (ticker, today, quote_data["price"]),
+            (original_ticker, today, quote_data["price"]),
         )
 
     return quote_data
@@ -204,6 +185,7 @@ def get_finnhub_quote(ticker: str) -> dict:
 def get_daily(ticker: str) -> pd.DataFrame:
     """Return DataFrame from local SQLite history."""
     ticker = ticker.upper().strip()
+    api_ticker = get_mapped_ticker(ticker)
     init_db()
 
     try:
@@ -225,7 +207,7 @@ def get_daily(ticker: str) -> pd.DataFrame:
 
     # If US stock (no European suffix), convert USD to EUR
     is_european = any(
-        ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
+        api_ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
     )
 
     if not is_european:
