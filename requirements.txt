@@ -1,0 +1,7 @@
+discord.py>=2.3.2
+yfinance>=0.2.36
+finnhub-python>=2.4.19
+python-dotenv>=1.0.1
+pandas>=2.2.0
+textual>=0.52.0
+matplotlib>=3.8.3
