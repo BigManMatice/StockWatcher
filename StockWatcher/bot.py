@@ -1,12 +1,16 @@
 import asyncio
+import datetime as dt
 import logging
+from zoneinfo import ZoneInfo
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
+import alerts
+import config
+import data
 import portfolio
 import signals
-import data
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +23,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    if not daily_scan.is_running():
+        daily_scan.start()
 
 
 @bot.event
@@ -111,3 +117,66 @@ async def check(ctx, ticker: str):
         )
     lines += [f"• {r}" for r in res["reasons"]]
     await ctx.send("\n".join(lines))
+SCAN_TZ = ZoneInfo("Europe/Brussels")
+SCAN_TIME = dt.time(hour=23, minute=0, tzinfo=SCAN_TZ)  # after the US market closes
+
+
+def format_alert(a):
+    icon = "🟢" if a["signal"] == "buy" else "🔴"
+    tag = " (you hold this)" if a["held"] else ""
+    lines = [f"{icon} **{a['ticker']}: {a['signal'].upper()}**{tag}  close {a['price']:.2f}"]
+    lines += [f"• {r}" for r in a["reasons"]]
+    return "\n".join(lines)
+
+
+async def run_scan(channel, always_reply=False):
+    alert_list, skipped, errors = await asyncio.to_thread(alerts.scan)
+    parts = [format_alert(a) for a in alert_list]
+    if skipped:
+        parts.append(f"⚠️ Skipped (API budget, will retry next scan): {', '.join(skipped)}")
+    if errors:
+        parts.append("⚠️ Errors: " + "; ".join(f"{t}: {e[:80]}" for t, e in errors))
+    if not parts and always_reply:
+        parts.append("Scan done: no new buy/sell signals.")
+    if parts:
+        await channel.send("\n\n".join(parts))
+
+
+@tasks.loop(time=SCAN_TIME)
+async def daily_scan():
+    if dt.datetime.now(SCAN_TZ).weekday() >= 5:  # skip Saturday and Sunday
+        return
+    channel = bot.get_channel(config.CHANNEL_ID) or await bot.fetch_channel(config.CHANNEL_ID)
+    await run_scan(channel)
+
+
+@daily_scan.error
+async def daily_scan_error(error):
+    log.error("Daily scan failed", exc_info=error)
+
+
+@bot.command()
+async def watch(ctx, ticker: str):
+    """!watch MSFT"""
+    added = await asyncio.to_thread(alerts.add_watch, ticker)
+    await ctx.send(f"👀 Watching {ticker.upper()}." if added else f"Already watching {ticker.upper()}.")
+
+
+@bot.command()
+async def unwatch(ctx, ticker: str):
+    """!unwatch MSFT"""
+    removed = await asyncio.to_thread(alerts.remove_watch, ticker)
+    await ctx.send(f"✅ Stopped watching {ticker.upper()}." if removed else f"❌ {ticker.upper()} isn't on your watchlist.")
+
+
+@bot.command()
+async def watchlist(ctx):
+    items = await asyncio.to_thread(alerts.get_watchlist)
+    await ctx.send("Watchlist: " + ", ".join(items) if items else "Watchlist is empty. Try `!watch MSFT`.")
+
+
+@bot.command()
+async def scan(ctx):
+    """Run the scan now, instead of waiting for 23:00."""
+    async with ctx.typing():
+        await run_scan(ctx.channel, always_reply=True)
