@@ -1,0 +1,28 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Automatically gets the exact directory containing config.py
+# Works on Windows, Linux Mint, inside OneDrive, or home directories
+BASE_DIR = Path(__file__).resolve().parent
+
+DB_PATH = BASE_DIR / "bot_database.db"
+LOG_PATH = BASE_DIR / "stockwatcher.log"
+ENV_PATH = BASE_DIR / ".env"
+
+# Load environment variables from .env
+load_dotenv(ENV_PATH)
+
+# API Keys & Discord Config
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY")
+FMP_KEY = os.getenv("FMP_KEY")
+
+# Channel IDs (defaults to 0 if missing/not set)
+ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "0"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
+
+# Basic token check
+if not DISCORD_TOKEN:
+    raise RuntimeError("Missing DISCORD_TOKEN in .env file.")
