@@ -7,7 +7,7 @@ import requests
 
 import config
 
-DB_PATH = "stockwatcher.db"
+DB_PATH = config.DB_PATH
 API_URL = "https://www.alphavantage.co/query"
 
 
