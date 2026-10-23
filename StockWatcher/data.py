@@ -1,94 +1,141 @@
 import sqlite3
 from contextlib import closing
-from datetime import date
-
+from datetime import date, datetime
 import pandas as pd
 import requests
-
 import config
-
-DB_PATH = config.DB_PATH
-API_URL = "https://www.alphavantage.co/query"
 
 
 class DataError(Exception):
-    """Raised when price data can't be fetched."""
+    """Custom exception for data fetching errors."""
+
+    pass
 
 
 def _connect():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect("bot_database.db")
 
 
 def init_db():
     with closing(_connect()) as conn, conn:
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS prices (
-                ticker TEXT NOT NULL,
-                date TEXT NOT NULL,
-                close REAL NOT NULL,
+            """
+            CREATE TABLE IF NOT EXISTS prices (
+                ticker TEXT,
+                date TEXT,
+                close REAL,
                 PRIMARY KEY (ticker, date)
-            )"""
+            )
+            """
         )
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS fetch_log (
-                ticker TEXT PRIMARY KEY,
+            """
+            CREATE TABLE IF NOT EXISTS fx (
+                pair TEXT PRIMARY KEY,
+                rate REAL NOT NULL,
                 fetched_on TEXT NOT NULL
-            )"""
+            )
+            """
         )
 
 
-def _fetch_from_api(ticker):
-    print(f"[data] fetching {ticker} from Alpha Vantage...")
-    params = {
-        "function": "TIME_SERIES_DAILY",
-        "symbol": ticker,
-        "outputsize": "compact",  # last ~100 days
-        "apikey": config.ALPHAVANTAGE_KEY,
-    }
-    try:
-        resp = requests.get(API_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-    except (requests.RequestException, ValueError) as e:
-        raise DataError(f"Request failed: {e}")
-
-    series = data.get("Time Series (Daily)")
-    if not series:
-        msg = (
-            data.get("Error Message")
-            or data.get("Note")
-            or data.get("Information")
-            or "Unknown API response"
-        )
-        raise DataError(msg)
-
-    return [(d, float(v["4. close"])) for d, v in series.items()]
+# --- FMP (USD/EUR Rate) ---
 
 
-def get_daily(ticker):
-    """Return a DataFrame (index=date, column=close in EUR) for the ticker.
-    Only calls the API if we haven't fetched this ticker today.
-    The DB stores raw USD closes; conversion to EUR happens on the way out."""
-    ticker = ticker.upper().strip()
+def get_usd_eur() -> float:
+    """Fetch USD->EUR exchange rate, cached daily in SQLite."""
     init_db()
     today = date.today().isoformat()
 
     with closing(_connect()) as conn:
         row = conn.execute(
-            "SELECT fetched_on FROM fetch_log WHERE ticker = ?", (ticker,)
+            "SELECT rate, fetched_on FROM fx WHERE pair = 'USDEUR'"
         ).fetchone()
 
-    if not row or row[0] != today:
-        rows = _fetch_from_api(ticker)
+    if row and row[1] == today:
+        return row[0]
+
+    url = f"https://financialmodelingprep.com/api/v3/quote/EURUSD?apikey={config.FMP_KEY}"
+
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data or not isinstance(data, list):
+            raise DataError("FMP returned invalid FX data.")
+
+        eur_usd_rate = float(data[0]["price"])
+        usd_eur_rate = 1.0 / eur_usd_rate
+
+    except Exception:
+        if row:  # Fallback to last saved rate if API fails/limits
+            return row[0]
+        # Default fallback rate if brand new & API fails
+        usd_eur_rate = 0.89
+
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO fx (pair, rate, fetched_on) VALUES ('USDEUR', ?, ?)",
+            (usd_eur_rate, today),
+        )
+
+    return usd_eur_rate
+
+
+# --- FINNHUB (Real-time Quotes + Local Database Storage) ---
+
+
+def get_finnhub_quote(ticker: str) -> dict:
+    """Fetch current real-time price from Finnhub and log it to SQLite."""
+    ticker = ticker.upper().strip()
+    url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={config.FINNHUB_KEY}"
+
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        res = resp.json()
+
+        price = float(res.get("c", 0))
+        prev_close = float(res.get("pc", 0))
+
+        if price == 0:
+            raise DataError(f"Invalid ticker or zero price returned for '{ticker}'")
+
+        pct_change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+
+        # Save today's price to our local database history
+        today = date.today().isoformat()
+        init_db()
         with closing(_connect()) as conn, conn:
-            conn.executemany(
-                "INSERT OR REPLACE INTO prices (ticker, date, close) VALUES (?, ?, ?)",
-                [(ticker, d, c) for d, c in rows],
-            )
             conn.execute(
-                "INSERT OR REPLACE INTO fetch_log (ticker, fetched_on) VALUES (?, ?)",
-                (ticker, today),
+                "INSERT OR REPLACE INTO prices (ticker, date, close) VALUES (?, ?, ?)",
+                (ticker, today, price),
             )
+
+        return {
+            "ticker": ticker,
+            "price": price,
+            "prev_close": prev_close,
+            "pct_change": pct_change,
+        }
+    except Exception as e:
+        raise DataError(f"Failed to fetch quote for {ticker}: {e}")
+
+
+def get_daily(ticker: str) -> pd.DataFrame:
+    """Return DataFrame (index=date, column=close in EUR) built from local SQLite history.
+
+    If today's price isn't in SQLite yet, it pulls from Finnhub to populate it.
+    """
+    ticker = ticker.upper().strip()
+    init_db()
+
+    # Trigger a quote fetch to ensure today's price is recorded locally
+    try:
+        get_finnhub_quote(ticker)
+    except DataError:
+        pass  # Use existing history if offline
 
     with closing(_connect()) as conn:
         df = pd.read_sql_query(
@@ -99,52 +146,11 @@ def get_daily(ticker):
             index_col="date",
         )
 
-    df["close"] = df["close"] * get_usd_eur()
+    if df.empty:
+        raise DataError(f"No price history found in database for '{ticker}'.")
+
+    # Convert stored USD closes to EUR before returning
+    eur_rate = get_usd_eur()
+    df["close"] = df["close"] * eur_rate
+
     return df
-
-def needs_fetch(ticker):
-    """True if get_daily() would call the API for this ticker."""
-    ticker = ticker.upper().strip()
-    init_db()
-    with closing(_connect()) as conn:
-        row = conn.execute(
-            "SELECT fetched_on FROM fetch_log WHERE ticker = ?", (ticker,)
-        ).fetchone()
-    return not row or row[0] != date.today().isoformat()
-
-def get_usd_eur():
-    """USD->EUR rate, cached once per day (costs 1 API call)."""
-    init_db()
-    today = date.today().isoformat()
-    with closing(_connect()) as conn, conn:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS fx "
-            "(pair TEXT PRIMARY KEY, rate REAL NOT NULL, fetched_on TEXT NOT NULL)"
-        )
-        row = conn.execute(
-            "SELECT rate, fetched_on FROM fx WHERE pair = 'USDEUR'"
-        ).fetchone()
-    if row and row[1] == today:
-        return row[0]
-
-    params = {
-        "function": "CURRENCY_EXCHANGE_RATE",
-        "from_currency": "USD",
-        "to_currency": "EUR",
-        "apikey": config.ALPHAVANTAGE_KEY,
-    }
-    try:
-        resp = requests.get(API_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        rate = float(resp.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
-    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
-        if row:  # fall back to the last known rate
-            return row[0]
-        raise DataError(f"Could not get USD/EUR rate: {e}")
-
-    with closing(_connect()) as conn, conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO fx (pair, rate, fetched_on) VALUES ('USDEUR', ?, ?)",
-            (rate, today),
-        )
-    return rate
