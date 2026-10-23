@@ -1,4 +1,3 @@
-# bot.py
 import asyncio
 from datetime import datetime
 import traceback
@@ -36,7 +35,7 @@ last_prices = {}
 # --- COMMANDS TO CHANGE & VIEW THRESHOLD ---
 
 @bot.command(name="setalert")
-@commands.has_permissions(administrator=True)  # Optional: restricts usage to admins
+@commands.has_permissions(administrator=True)
 async def set_alert_threshold(ctx, percentage: float):
     """Dynamically set the price spike alert percentage threshold."""
     global SPIKE_THRESHOLD_PCT
@@ -111,7 +110,7 @@ async def minute_market_scanner():
                 pct = quote["pct_change"]
                 icon = "🟢" if pct >= 0 else "🔴"
 
-                # Check for rapid minute-by-minute price spikes using dynamic SPIKE_THRESHOLD_PCT
+                # Check for rapid minute-by-minute price spikes
                 if ticker in last_prices and alert_channel:
                     prev_price = last_prices[ticker]
                     spike_pct = ((price - prev_price) / prev_price) * 100
@@ -169,10 +168,7 @@ async def on_ready():
         minute_market_scanner.start()
 
 
-
-
 # --- BOT COMMANDS ---
-
 
 @bot.command(name="help")
 async def help_cmd(ctx):
@@ -184,8 +180,9 @@ async def help_cmd(ctx):
     )
 
     embed.add_field(
-        name="Portfolio",
+        name="Portfolio & Account",
         value=(
+            "`!connect matice` — Link Discord ID to custom CLI username\n"
             "`!add AAPL 500 172.30` — Add position (total paid in €, price per share in €)\n"
             "`!remove AAPL` — Remove whole position\n"
             "`!remove AAPL 2` — Remove 2 shares\n"
@@ -236,95 +233,127 @@ async def ping(ctx):
     await ctx.send("Pong! 🏓")
 
 
-@bot.command()
-async def add(ctx, ticker: str, amount_eur: float, price_eur: float):
-    """!add AAPL 75 309.12  (total paid in €, price per share in €)"""
-    if amount_eur <= 0 or price_eur <= 0:
-        await ctx.send("❌ Amount and price must be positive.")
-        return
+@bot.command(name="connect")
+async def connect_account(ctx, username: str):
+    """Links your Discord ID to a custom username for CLI UI login."""
+    clean_username = username.strip().lower()
+    discord_id = str(ctx.author.id)
 
-    # Shares = Total EUR Paid / EUR Price Per Share
-    shares = amount_eur / price_eur
+    portfolio.link_discord_account(discord_id, clean_username)
 
-    await asyncio.to_thread(portfolio.add_holding, ticker, shares, price_eur)
-    await ctx.send(
-        f"✅ Added **{ticker.upper()}**: {amount_eur:.2f} € paid at {price_eur:.2f} €/share "
-        f"= {shares:.4f} shares"
+    embed = discord.Embed(
+        title="🔗 Account Connected",
+        description=(
+            f"Successfully linked **{ctx.author.name}** (Discord ID: `{discord_id}`) "
+            f"to CLI username **`{clean_username}`**!\n\n"
+            f"You can now use `!login {clean_username}` in the CLI dashboard to manage this portfolio."
+        ),
+        color=discord.Color.green(),
     )
+    await ctx.send(embed=embed)
 
 
-@bot.command()
-async def remove(ctx, ticker: str, shares: float = None):
-    """!remove AAPL or !remove AAPL 2"""
-    removed = await asyncio.to_thread(portfolio.remove_holding, ticker, shares)
-    if not removed:
-        await ctx.send(f"❌ You don't hold any **{ticker.upper()}**.")
-    elif shares is None:
-        await ctx.send(f"✅ Removed whole position for **{ticker.upper()}**.")
-    else:
-        await ctx.send(f"✅ Removed {shares} shares from **{ticker.upper()}**.")
+@bot.command(name="add")
+async def add_cmd(ctx, ticker: str, total_paid: float, buy_price: float):
+    try:
+        portfolio.add_holding(str(ctx.author.id), ticker, total_paid, buy_price)
+        shares = total_paid / buy_price
+        
+        embed = discord.Embed(
+            title="✅ Position Added",
+            description=(
+                f"Added **{ticker.upper()}** to **{ctx.author.name}**'s portfolio!\n"
+                f"• Total Paid: €`{total_paid:.2f}`\n"
+                f"• Buy Price: €`{buy_price:.2f}` / share\n"
+                f"• Shares Acquired: `{shares:.4f}`"
+            ),
+            color=discord.Color.green()
+        )
+        await ctx.send(embed=embed)
+    except ValueError as e:
+        await ctx.send(f"⚠️ Error: {e}")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to add position: {e}")
 
 
-# Map European ticker symbols to clean display names in Discord
-DISPLAY_NAMES = {
-    "APC.DE": "AAPL",
-    "APC.LS": "AAPL",
-    "CSPX.AS": "S&P500",
-    "SXR8.DE": "S&P500",
-    "SXR8.LS": "S&P500",
-}
+@bot.command(name="remove")
+async def remove_cmd(ctx, ticker: str, shares: float = None):
+    try:
+        success = portfolio.remove_holding(str(ctx.author.id), ticker, shares)
+        if success:
+            removed_str = f"`{shares}` shares of" if shares else "all shares of"
+            await ctx.send(f"🗑️ Removed {removed_str} **{ticker.upper()}** from **{ctx.author.name}**'s portfolio.")
+        else:
+            await ctx.send(f"⚠️ No open position for **{ticker.upper()}** found.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to remove position: {e}")
 
-from stockName import get_display_name
 
 @bot.command(name="portfolio")
 async def show_portfolio(ctx):
-    async with ctx.typing():
-        items = await asyncio.to_thread(portfolio.get_portfolio)
+    """Displays user portfolio using exact custom Embed styling."""
+    # Resolve user ID (handles raw Discord ID or custom linked account)
+    holdings = portfolio.get_portfolio(str(ctx.author.id))
 
-    if not items:
-        await ctx.send("Your portfolio is empty.")
+    if not holdings:
+        await ctx.send(
+            f"💼 Portfolio for **{ctx.author.name}** is currently empty. "
+            "Use `!add <ticker> <total_paid> <buy_price>` to add positions."
+        )
         return
 
-    embed = discord.Embed(title="📊 Portfolio (EUR)")
-    total_value = total_cost = 0.0
+    # Create Embed styled exactly like your reference UI
+    embed = discord.Embed(
+        title="📊 Portfolio (EUR)",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow(),
+    )
 
-    for it in items:
-        # Translates DB ticker (e.g. 'APC.DE' or 'AAPL') into 'AAPL (APC.DE)'
-        display_label = get_display_name(it["ticker"])
+    total_val = 0.0
+    total_cost = 0.0
 
-        if it["price"] is None:
-            embed.add_field(
-                name=f"⚠️ {display_label}", value=it["error"][:200], inline=False
-            )
-            continue
+    for item in holdings:
+        ticker = item["ticker"]
+        display_name = get_display_name(ticker)
+        
+        # Build composite label like "AAPL (APC.DE)" if ticker differs from display name
+        if display_name != ticker:
+            label = f"{display_name} ({ticker})"
+        else:
+            label = ticker
 
-        total_value += it["value"]
-        total_cost += it["cost"]
-        icon = "🟢" if it["pl"] >= 0 else "🔴"
+        shares = item["shares"]
+        buy_p = item["buy_price"]
+        curr_p = item.get("price", buy_p) or buy_p
+        val = item.get("value", shares * curr_p)
+        cost = item.get("cost", shares * buy_p)
+        pl = item.get("pl", val - cost)
+        pl_pct = item.get("pl_pct", 0.0)
 
-        embed.add_field(
-            name=f"{icon} {display_label}   {it['pl']:+.2f} € ({it['pl_pct']:+.2f}%)",
-            value=(
-                f"{it['shares']:.4f} shares\n"
-                f"Bought at {it['buy_price']:.2f} € → now {it['price']:.2f} €\n"
-                f"Value **{it['value']:.2f} €** (paid {it['cost']:.2f} €)"
-            ),
-            inline=False,
+        total_val += val
+        total_cost += cost
+
+        # Green circle for profit / Red circle for loss
+        circle = "🟢" if pl >= 0 else "🔴"
+
+        field_title = f"{circle} {label}   {pl:+.2f} € ({pl_pct:+.2f}%)"
+        field_body = (
+            f"{shares:.4f} shares\n"
+            f"Bought at {buy_p:.2f} € → now {curr_p:.2f} €\n"
+            f"Value **{val:.2f} €** (paid {cost:.2f} €)"
         )
 
-    if total_cost > 0:
-        pl = total_value - total_cost
-        embed.color = (
-            discord.Color.green() if pl >= 0 else discord.Color.red()
-        )
-        embed.add_field(
-            name="Total",
-            value=(
-                f"Value **{total_value:.2f} €** · paid {total_cost:.2f} €\n"
-                f"Profit/loss **{pl:+.2f} €** ({pl / total_cost * 100:+.2f}%)"
-            ),
-            inline=False,
-        )
+        embed.add_field(name=field_title, value=field_body, inline=False)
+
+    total_pl = total_val - total_cost
+    total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0.0
+
+    # Total Summary Section
+    summary_body = (
+        f"Value **{total_val:.2f} €** · paid {total_cost:.2f} €\n"
+        f"Profit/loss **{total_pl:+.2f} €** ({total_pl_pct:+.2f}%)"
+    )
+    embed.add_field(name="Total", value=summary_body, inline=False)
 
     await ctx.send(embed=embed)
 
@@ -356,7 +385,7 @@ async def watchlist(ctx):
 @bot.command(name="scan")
 async def scan_watchlist(ctx):
     """Scans all tickers in the watchlist for technical signals."""
-    watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"] # or fetch from DB
+    watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
 
     async with ctx.typing():
         embed = discord.Embed(title="🔍 Technical Signal Scan (EUR)")

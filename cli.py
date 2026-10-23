@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.widgets import Button, Footer, Header, Input, Log, Static
 
 # Ensure relative module resolution
@@ -19,6 +19,28 @@ import data
 import portfolio
 import signals
 from stockName import get_display_name
+
+CACHE_FILE = config.BASE_DIR / "active_user.txt"
+
+
+def get_cached_user() -> str:
+    """Read last logged-in user from cache file."""
+    if CACHE_FILE.exists():
+        try:
+            user = CACHE_FILE.read_text(encoding="utf-8").strip()
+            if user:
+                return user
+        except Exception:
+            pass
+    return "default_user"
+
+
+def set_cached_user(user_id: str) -> None:
+    """Save active user to cache file."""
+    try:
+        CACHE_FILE.write_text(str(user_id).strip(), encoding="utf-8")
+    except Exception as e:
+        print(f"⚠️ Failed to cache active user: {e}")
 
 
 class LogRedirector(io.TextIOBase):
@@ -38,7 +60,9 @@ class LogRedirector(io.TextIOBase):
                 if threading.get_ident() == self.log_widget.app._thread_id:
                     self.log_widget.write_line(line)
                 else:
-                    self.log_widget.app.call_from_thread(self.log_widget.write_line, line)
+                    self.log_widget.app.call_from_thread(
+                        self.log_widget.write_line, line
+                    )
         return len(s)
 
     def flush(self) -> None:
@@ -47,12 +71,18 @@ class LogRedirector(io.TextIOBase):
             if threading.get_ident() == self.log_widget.app._thread_id:
                 self.log_widget.write_line(line)
             else:
-                self.log_widget.app.call_from_thread(self.log_widget.write_line, line)
+                self.log_widget.app.call_from_thread(
+                    self.log_widget.write_line, line
+                )
             self._buffer = ""
 
 
 class DashboardApp(App):
-    """Terminal Dashboard for StonksBot with Complete Command Hub Controls"""
+    """Terminal Dashboard for StonksBot with Persistent Account Caching"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.active_user_id = get_cached_user()
 
     CSS = """
     Screen {
@@ -85,34 +115,31 @@ class DashboardApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
 
-        # Quadrant 1: System Status
         yield Static("", classes="box", id="status")
-
-        # Quadrant 2: Live Watchlist Quick View
         yield Static(
             "📈 [bold yellow]Watchlist Quick View[/bold yellow]\nLoading tickers...",
             classes="box",
             id="watchlist",
         )
-
-        # Quadrant 3: Live Terminal Logs & Command Output
         yield Log(classes="box", id="log_window")
 
-        # Quadrant 4: Interactive Command Center & Controls
         with Container(classes="box", id="controls"):
-            yield Static("⚙️ [bold cyan]Command & Alert Hub[/bold cyan]")
+            yield Static("⚙️ [bold cyan]Command & Account Hub[/bold cyan]")
 
-            # Set Threshold Input
             with Horizontal(classes="control-row"):
-                yield Input(placeholder="Set Alert % (e.g. 1.5)", id="input_threshold", value="2.0")
+                yield Input(
+                    placeholder="Set Alert % (e.g. 1.5)",
+                    id="input_threshold",
+                    value="2.0",
+                )
                 yield Button("Set Threshold", id="btn_set_threshold", variant="success")
 
-            # Custom Bot Command Input
             with Horizontal(classes="control-row"):
-                yield Input(placeholder="Type command (e.g. !add AAPL 500 170)", id="input_cmd")
+                yield Input(
+                    placeholder="Type command (e.g. !login matic)", id="input_cmd"
+                )
                 yield Button("Run Command", id="btn_run_cmd", variant="primary")
 
-            # Quick Action Buttons
             with Horizontal(classes="control-row"):
                 yield Button("💼 Portfolio", id="btn_portfolio", variant="default")
                 yield Button("🔍 Scan Watchlist", id="btn_scan", variant="primary")
@@ -124,7 +151,6 @@ class DashboardApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Runs when dashboard launches."""
         log_widget = self.query_one("#log_window", Log)
         log_widget.write_line("🚀 Dashboard Command Hub Initialized.")
 
@@ -133,24 +159,21 @@ class DashboardApp(App):
         self.update_status_view()
         self.update_watchlist_view()
 
-        # Auto-refresh UI status and prices every 60 seconds
         self.set_interval(60.0, self.update_watchlist_view)
         self.set_interval(60.0, self.update_status_view)
 
     def update_status_view(self) -> None:
-        """Update system status widget with active threshold."""
         threshold = getattr(bot, "SPIKE_THRESHOLD_PCT", 2.0)
         status_text = (
             "📊 [bold green]System Status[/bold green]\n"
+            f"• Active Account: [bold cyan]{self.active_user_id}[/bold cyan] (Cached)\n"
             "• Discord Bot: Active\n"
             "• Database: Connected\n"
-            "• Scanner Interval: 1 min\n"
             f"• Alert Threshold: [bold yellow]±{threshold:.1f}%[/bold yellow]"
         )
         self.query_one("#status", Static).update(status_text)
 
     def update_watchlist_view(self) -> None:
-        """Fetch live ticker prices and update the UI box."""
         watchlist = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
         lines = ["📈 [bold yellow]Watchlist Quick View[/bold yellow]"]
 
@@ -160,14 +183,15 @@ class DashboardApp(App):
                 p = quote["price"]
                 pct = quote["pct_change"]
                 color = "green" if pct >= 0 else "red"
-                lines.append(f"• {ticker:<8} €{p:.2f} [{color}]({pct:+.2f}%)[/{color}]")
+                lines.append(
+                    f"• {ticker:<8} €{p:.2f} [{color}]({pct:+.2f}%)[/{color}]"
+                )
             except Exception as e:
                 lines.append(f"• {ticker:<8} [red]Error[/red]")
 
         self.query_one("#watchlist", Static).update("\n".join(lines))
 
     def execute_custom_command(self, cmd_text: str) -> None:
-        """Parse and execute CLI commands with detailed portfolio breakdown in UI."""
         cmd_text = cmd_text.strip()
         if not cmd_text:
             return
@@ -177,71 +201,79 @@ class DashboardApp(App):
 
         print(f"💻 [UI Command]: {cmd_text}")
 
+        # Login command with caching
+        if cmd == "!login":
+            if len(parts) < 2:
+                print(
+                    f"⚠️ Usage: `!login <user_id_or_name>` (Current Active: `{self.active_user_id}`)"
+                )
+            else:
+                self.active_user_id = parts[1]
+                set_cached_user(self.active_user_id)
+                self.update_status_view()
+                print(
+                    f"🔐 Switched and cached active account to: [bold cyan]{self.active_user_id}[/bold cyan]"
+                )
+                self.execute_custom_command("!portfolio")
+
         # Help command
-        if cmd in ("!help", "help"):
+        elif cmd in ("!help", "help"):
             print(
                 "📜 [Available CLI Commands]\n"
-                "• `!portfolio` — Show current holdings, values, and total P/L\n"
-                "• `!add <ticker> <total_paid> <buy_price>` — Add stock position (e.g. `!add AAPL 500 172.30`)\n"
-                "• `!remove <ticker> [shares]` — Remove whole or partial position (e.g. `!remove AAPL`)\n"
+                "• `!login <user_id>` — Switch active portfolio account (saved to cache)\n"
+                "• `!portfolio` — Show active account holdings and total P/L\n"
+                "• `!add <ticker> <total_paid> <buy_price>` — Add position (e.g. `!add AAPL 500 172.30`)\n"
+                "• `!remove <ticker> [shares]` — Remove whole or partial position\n"
                 "• `!check <ticker>` — Run price & indicator check on ticker\n"
-                "• `!scan` — Run signal scan across watchlist\n"
-                "• `!threshold` — View active alert percentage"
+                "• `!scan` — Run signal scan across watchlist"
             )
 
         # Portfolio command
         elif cmd == "!portfolio":
             try:
-                positions = []
-                if hasattr(portfolio, "get_positions"):
-                    positions = portfolio.get_positions()
-                elif hasattr(portfolio, "load_portfolio"):
-                    positions = portfolio.load_portfolio()
-                
-                if not positions:
-                    print("💼 Portfolio is currently empty. Add positions using `!add <ticker> <paid_eur> <buy_price>`.")
+                holdings = portfolio.get_portfolio(self.active_user_id)
+                if not holdings:
+                    print(
+                        f"💼 Portfolio for account `{self.active_user_id}` is empty. "
+                        "Add positions using `!add <ticker> <total_paid> <buy_price>`."
+                    )
                     return
 
-                print("\n💼 [PORTFOLIO SUMMARY]")
-                print("-" * 55)
-                print(f"{'Ticker':<8} | {'Shares':<8} | {'Avg Price':<10} | {'Current':<10} | {'P/L (€)':<10}")
-                print("-" * 55)
+                print(f"\n💼 [PORTFOLIO SUMMARY — Account: {self.active_user_id}]")
+                print("-" * 62)
+                print(
+                    f"{'Ticker':<8} | {'Shares':<8} | {'Avg Price':<10} | {'Current':<10} | {'P/L (€)':<10}"
+                )
+                print("-" * 62)
 
                 total_val = 0.0
                 total_cost = 0.0
 
-                for item in positions:
-                    if isinstance(item, dict):
-                        ticker = item.get("ticker", "UNKNOWN").upper()
-                        shares = float(item.get("shares", 0))
-                        buy_price = float(item.get("buy_price", 0))
-                        paid = float(item.get("total_paid", shares * buy_price))
-                    elif isinstance(item, (list, tuple)) and len(item) >= 3:
-                        ticker, shares, buy_price = item[0].upper(), float(item[1]), float(item[2])
-                        paid = shares * buy_price
-                    else:
-                        continue
+                for item in holdings:
+                    ticker = item["ticker"]
+                    shares = item["shares"]
+                    buy_price = item["buy_price"]
+                    curr_price = item.get("price", buy_price) or buy_price
+                    val = item.get("value", shares * curr_price)
+                    cost = item.get("cost", shares * buy_price)
+                    pl = item.get("pl", val - cost)
 
-                    # Fetch live market price
-                    try:
-                        quote = data.get_finnhub_quote(ticker)
-                        curr_price = float(quote.get("price", buy_price))
-                    except Exception:
-                        curr_price = buy_price
+                    total_val += val
+                    total_cost += cost
 
-                    curr_val = shares * curr_price
-                    pl = curr_val - paid
-                    
-                    total_val += curr_val
-                    total_cost += paid
-
-                    print(f"{ticker:<8} | {shares:<8.2f} | €{buy_price:<9.2f} | €{curr_price:<9.2f} | €{pl:<+9.2f}")
+                    print(
+                        f"{ticker:<8} | {shares:<8.2f} | €{buy_price:<9.2f} | €{curr_price:<9.2f} | €{pl:<+9.2f}"
+                    )
 
                 total_pl = total_val - total_cost
-                total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0.0
+                total_pl_pct = (
+                    (total_pl / total_cost * 100) if total_cost > 0 else 0.0
+                )
 
-                print("-" * 55)
-                print(f"Total Value: €{total_val:.2f} | Total P/L: €{total_pl:+.2f} ({total_pl_pct:+.2f}%)\n")
+                print("-" * 62)
+                print(
+                    f"Total Value: €{total_val:.2f} | Total P/L: €{total_pl:+.2f} ({total_pl_pct:+.2f}%)\n"
+                )
 
             except Exception as e:
                 print(f"❌ Portfolio Error: {e}")
@@ -249,47 +281,55 @@ class DashboardApp(App):
         # Add position command
         elif cmd == "!add":
             if len(parts) < 4:
-                print("⚠️ Usage: `!add <ticker> <total_paid> <buy_price>` (e.g. `!add AAPL 500 172.30`)")
+                print(
+                    "⚠️ Usage: `!add <ticker> <total_paid> <buy_price>` (e.g. `!add AAPL 500 172.30`)"
+                )
             else:
                 ticker = parts[1].upper()
                 try:
                     total_paid = float(parts[2])
                     buy_price = float(parts[3])
-                    shares = total_paid / buy_price
+                    portfolio.add_holding(
+                        self.active_user_id, ticker, total_paid, buy_price
+                    )
 
-                    if hasattr(portfolio, "add_position"):
-                        portfolio.add_position(ticker, total_paid, buy_price)
+                    print(
+                        f"\n✅ [POSITION ADDED] Account: {self.active_user_id}\n"
+                        f"• Ticker: {ticker}\n"
+                        f"• Total Paid: €{total_paid:.2f}\n"
+                        f"• Buy Price: €{buy_price:.2f} / share\n"
+                        f"• Shares: {total_paid / buy_price:.4f}\n"
+                    )
 
-                    print(f"\n✅ [POSITION ADDED]")
-                    print(f"• Ticker: {ticker}")
-                    print(f"• Total Paid: €{total_paid:.2f}")
-                    print(f"• Buy Price: €{buy_price:.2f} / share")
-                    print(f"• Shares Acquired: {shares:.4f}\n")
-
-                    # Automatically refresh portfolio view
                     self.execute_custom_command("!portfolio")
 
                 except ValueError:
-                    print("⚠️ Invalid numerical inputs for total_paid or buy_price.")
+                    print("⚠️ Total paid and buy price must be valid numbers.")
                 except Exception as e:
                     print(f"❌ Failed to add position: {e}")
 
         # Remove position command
         elif cmd == "!remove":
             if len(parts) < 2:
-                print("⚠️ Usage: `!remove <ticker> [shares]` (e.g. `!remove AAPL` or `!remove AAPL 2`)")
+                print(
+                    "⚠️ Usage: `!remove <ticker> [shares]` (e.g. `!remove AAPL` or `!remove AAPL 2`)"
+                )
             else:
                 ticker = parts[1].upper()
                 shares = float(parts[2]) if len(parts) >= 3 else None
                 try:
-                    if hasattr(portfolio, "remove_position"):
-                        portfolio.remove_position(ticker, shares)
-
-                    removed_str = f"{shares} shares of" if shares else "all shares of"
-                    print(f"🗑️ Removed {removed_str} {ticker} from portfolio.")
-                    
-                    # Refresh portfolio view
-                    self.execute_custom_command("!portfolio")
+                    success = portfolio.remove_holding(
+                        self.active_user_id, ticker, shares
+                    )
+                    if success:
+                        print(
+                            f"🗑️ Removed position for {ticker} from account `{self.active_user_id}`."
+                        )
+                        self.execute_custom_command("!portfolio")
+                    else:
+                        print(
+                            f"⚠️ No open position for {ticker} found in account `{self.active_user_id}`."
+                        )
                 except Exception as e:
                     print(f"❌ Failed to remove position: {e}")
 
@@ -301,7 +341,9 @@ class DashboardApp(App):
                 ticker = parts[1].upper()
                 try:
                     res = signals.analyze_ticker(ticker)
-                    print(f"🔍 {ticker}: €{res.get('price', 0.0):.2f} | Verdict: {res.get('verdict', 'N/A')}")
+                    print(
+                        f"🔍 {ticker}: €{res.get('price', 0.0):.2f} | Verdict: {res.get('verdict', 'N/A')}"
+                    )
                 except Exception as e:
                     print(f"❌ Check failed for {ticker}: {e}")
 
@@ -315,16 +357,12 @@ class DashboardApp(App):
                 except Exception as e:
                     print(f"❌ {t} scan failed: {e}")
 
-        # Threshold view command
-        elif cmd == "!threshold":
-            t = getattr(bot, "SPIKE_THRESHOLD_PCT", 2.0)
-            print(f"⚙️ Current Alert Threshold: ±{t}%")
-
         else:
-            print(f"⚠️ Command '{cmd}' not recognized. Type `!help` to view valid commands.")
+            print(
+                f"⚠️ Command '{cmd}' not recognized. Type `!help` to view valid commands."
+            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle UI button interactions."""
         if event.button.id == "btn_set_threshold":
             val_str = self.query_one("#input_threshold", Input).value
             try:
@@ -336,7 +374,7 @@ class DashboardApp(App):
                 self.update_status_view()
                 print(f"⚙️ Alert threshold updated via UI to ±{val:.2f}%")
             except ValueError:
-                print("⚠️ Invalid number format. Please enter a valid float (e.g. 1.5).")
+                print("⚠️ Invalid number format.")
 
         elif event.button.id == "btn_run_cmd":
             cmd_input = self.query_one("#input_cmd", Input)
