@@ -1,3 +1,4 @@
+# bot.py
 import asyncio
 from datetime import datetime
 import traceback
@@ -31,11 +32,12 @@ last_prices = {}
 @commands.has_permissions(administrator=True)
 async def set_alert_threshold(ctx, percentage: float):
     global SPIKE_THRESHOLD_PCT
-    if percentage <= 0:
+    val = float(percentage)
+    if val <= 0:
         await ctx.send("⚠️ Threshold percentage must be greater than 0.")
         return
 
-    SPIKE_THRESHOLD_PCT = percentage
+    SPIKE_THRESHOLD_PCT = val
     embed = discord.Embed(
         title="⚙️ Alert Threshold Updated",
         description=f"Price spike alerts will now trigger on moves of **±{SPIKE_THRESHOLD_PCT}%** or higher.",
@@ -80,7 +82,7 @@ async def minute_market_scanner():
             except Exception as e:
                 print(f"[Alert Warning] Could not find alert channel: {e}")
 
-        watchlist_items = alerts.get_watchlist() or ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
+        watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
 
         embed = discord.Embed(
             title="📈 Watchlist Live Status",
@@ -96,23 +98,27 @@ async def minute_market_scanner():
                 pct = quote["pct_change"]
                 icon = "🟢" if pct >= 0 else "🔴"
 
-                if ticker in last_prices and alert_channel:
+                if ticker in last_prices:
                     prev_price = last_prices[ticker]
-                    spike_pct = ((price - prev_price) / prev_price) * 100
+                    spike_pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
 
                     if abs(spike_pct) >= SPIKE_THRESHOLD_PCT:
                         alert_icon = "🚀" if spike_pct > 0 else "💥"
+                        alert_msg = (
+                            f"{alert_icon} **Price Spike Alert!**\n"
+                            f"**{display_name}** moved **{spike_pct:+.2f}%**!\n"
+                            f"• Prev: €{prev_price:.2f} ➔ Curr: €{price:.2f}"
+                        )
                         alert_embed = discord.Embed(
                             title=f"{alert_icon} Price Spike Alert! (Threshold: ±{SPIKE_THRESHOLD_PCT}%)",
-                            description=(
-                                f"**{display_name}** moved **{spike_pct:+.2f}%** in the last minute!\n"
-                                f"• **Previous Price:** €{prev_price:.2f}\n"
-                                f"• **Current Price:** €{price:.2f}"
-                            ),
+                            description=alert_msg,
                             color=discord.Color.gold() if spike_pct > 0 else discord.Color.dark_red(),
                             timestamp=discord.utils.utcnow(),
                         )
-                        await alert_channel.send(embed=alert_embed)
+                        
+                        target = alert_channel or log_channel
+                        if target:
+                            await target.send(embed=alert_embed)
 
                 last_prices[ticker] = price
 
@@ -143,9 +149,7 @@ async def before_scanner():
 async def on_ready():
     bot_name = bot.user.name if bot.user else "StonksBot"
     bot_id = bot.user.id if bot.user else "0000"
-    log_msg = f"🟢 Connected to Discord API as {bot_name} ({bot_id})"
-    print(log_msg, flush=True)
-    
+    print(f"Logged in as {bot_name} ({bot_id})")
     if not minute_market_scanner.is_running():
         minute_market_scanner.start()
 
@@ -215,14 +219,19 @@ async def connect_account(ctx, username: str):
 @bot.command(name="add")
 async def add_cmd(ctx, ticker: str, total_paid: float, buy_price: float):
     try:
-        portfolio.add_holding(str(ctx.author.id), ticker, total_paid, buy_price)
-        shares = total_paid / buy_price
+        total_paid_num = float(total_paid)
+        buy_price_num = float(buy_price)
+
+        user_id = portfolio.resolve_user_id(str(ctx.author.id))
+        portfolio.add_holding(user_id, ticker, total_paid_num, buy_price_num)
+        shares = total_paid_num / buy_price_num
+
         embed = discord.Embed(
             title="✅ Position Added",
             description=(
                 f"Added **{ticker.upper()}** to portfolio!\n"
-                f"• Total Paid: €`{total_paid:.2f}`\n"
-                f"• Buy Price: €`{buy_price:.2f}` / share\n"
+                f"• Total Paid: €`{total_paid_num:.2f}`\n"
+                f"• Buy Price: €`{buy_price_num:.2f}` / share\n"
                 f"• Shares Acquired: `{shares:.4f}`"
             ),
             color=discord.Color.green(),
@@ -235,8 +244,10 @@ async def add_cmd(ctx, ticker: str, total_paid: float, buy_price: float):
 @bot.command(name="remove")
 async def remove_cmd(ctx, ticker: str, shares: float = None):
     try:
-        if portfolio.remove_holding(str(ctx.author.id), ticker, shares):
-            removed_str = f"`{shares}` shares of" if shares else "all shares of"
+        user_id = portfolio.resolve_user_id(str(ctx.author.id))
+        shares_num = float(shares) if shares is not None else None
+        if portfolio.remove_holding(user_id, ticker, shares_num):
+            removed_str = f"`{shares_num}` shares of" if shares_num is not None else "all shares of"
             await ctx.send(f"🗑️ Removed {removed_str} **{ticker.upper()}** from portfolio.")
         else:
             await ctx.send(f"⚠️ No open position for **{ticker.upper()}** found.")
@@ -246,7 +257,8 @@ async def remove_cmd(ctx, ticker: str, shares: float = None):
 
 @bot.command(name="portfolio")
 async def show_portfolio(ctx):
-    holdings = portfolio.get_portfolio(str(ctx.author.id))
+    user_id = portfolio.resolve_user_id(str(ctx.author.id))
+    holdings = portfolio.get_portfolio(user_id)
     if not holdings:
         await ctx.send("💼 Portfolio is currently empty. Use `!add` to track positions.")
         return
@@ -294,19 +306,22 @@ async def show_portfolio(ctx):
 
 @bot.command()
 async def watch(ctx, ticker: str):
-    await asyncio.to_thread(alerts.add_watchlist, ticker)
+    user_id = portfolio.resolve_user_id(str(ctx.author.id))
+    await asyncio.to_thread(alerts.add_watchlist, user_id, ticker)
     await ctx.send(f"✅ Added **{ticker.upper()}** to watchlist.")
 
 
 @bot.command()
 async def unwatch(ctx, ticker: str):
-    await asyncio.to_thread(alerts.remove_watchlist, ticker)
+    user_id = portfolio.resolve_user_id(str(ctx.author.id))
+    await asyncio.to_thread(alerts.remove_watchlist, user_id, ticker)
     await ctx.send(f"✅ Removed **{ticker.upper()}** from watchlist.")
 
 
 @bot.command()
 async def watchlist(ctx):
-    tickers = await asyncio.to_thread(alerts.get_watchlist)
+    user_id = portfolio.resolve_user_id(str(ctx.author.id))
+    tickers = await asyncio.to_thread(alerts.get_watchlist, user_id)
     if not tickers:
         await ctx.send("Watchlist is empty. Add stocks with `!watch TICKER`.")
     else:
@@ -315,7 +330,8 @@ async def watchlist(ctx):
 
 @bot.command(name="scan")
 async def scan_watchlist(ctx):
-    watchlist_items = alerts.get_watchlist()
+    user_id = portfolio.resolve_user_id(str(ctx.author.id))
+    watchlist_items = alerts.get_watchlist(user_id)
     if not watchlist_items:
         await ctx.send("⚠️ Watchlist is empty. Add tickers using `!watch TICKER`.")
         return
@@ -392,3 +408,52 @@ async def check_ticker(ctx, ticker: str):
             await ctx.send(embed=embed)
         except Exception as e:
             await ctx.send(f"❌ Failed to check {ticker}: {e}")
+
+
+class CLIContext:
+    def __init__(self, user_id: str):
+        resolved_id = portfolio.resolve_user_id(user_id)
+        self.author = type("User", (), {"id": resolved_id, "name": user_id})()
+
+    async def send(self, content=None, embed=None):
+        if content:
+            print(f"🤖 {content}")
+        if embed:
+            print(f"\n--- {embed.title} ---")
+            if embed.description:
+                print(embed.description)
+            for field in embed.fields:
+                print(f"• {field.name}:\n  {field.value}")
+            print("-" * 40)
+
+    def typing(self):
+        class DummyTyping:
+            async def __aenter__(self): pass
+            async def __aexit__(self, *args): pass
+        return DummyTyping()
+
+
+async def execute_unified_command(user_id: str, command_line: str):
+    cmd_line = command_line.strip()
+    if not cmd_line.startswith("!"):
+        cmd_line = "!" + cmd_line
+
+    parts = cmd_line[1:].split()
+    if not parts:
+        return
+
+    cmd_name = parts[0].lower()
+    args = parts[1:]
+
+    cmd = bot.get_command(cmd_name)
+    if not cmd:
+        print(f"⚠️ Unknown command: `!{cmd_name}`. Type `!help` for available commands.")
+        return
+
+    ctx = CLIContext(user_id)
+    try:
+        await cmd.callback(ctx, *args)
+    except TypeError as e:
+        print(f"⚠️ Command argument error: {e}")
+    except Exception as e:
+        print(f"❌ Execution Error: {e}")

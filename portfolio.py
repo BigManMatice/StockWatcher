@@ -1,125 +1,140 @@
+# portfolio.py
 from contextlib import closing
 import data
-
-
-def resolve_user_id(identifier: str) -> str:
-    data.init_db()
-    identifier_clean = str(identifier).strip().lower()
-
-    with closing(data._connect()) as conn:
-        row = conn.execute(
-            "SELECT discord_id FROM account_links WHERE custom_username = ?",
-            (identifier_clean,),
-        ).fetchone()
-        return row[0] if row else identifier_clean
+from stockName import get_mapped_ticker, get_display_name
 
 
 def link_discord_account(discord_id: str, custom_username: str):
     data.init_db()
-    username = custom_username.strip().lower()
-    discord_id = str(discord_id)
-
+    clean_user = str(custom_username).strip().lower()
     with closing(data._connect()) as conn, conn:
         conn.execute(
-            """INSERT INTO account_links (custom_username, discord_id) 
-               VALUES (?, ?) 
-               ON CONFLICT(custom_username) DO UPDATE SET discord_id = excluded.discord_id""",
-            (username, discord_id),
+            "INSERT OR REPLACE INTO account_links (custom_username, discord_id) VALUES (?, ?)",
+            (clean_user, str(discord_id)),
         )
 
 
-def add_holding(user_identifier, ticker, total_paid, buy_price):
+def resolve_user_id(identifier: str) -> str:
+    """Translates a CLI custom username into its linked numeric Discord ID (or vice versa)."""
+    data.init_db()
+    clean_identifier = str(identifier).strip().lower()
+
+    with closing(data._connect()) as conn:
+        row = conn.execute(
+            "SELECT discord_id FROM account_links WHERE custom_username = ?",
+            (clean_identifier,),
+        ).fetchone()
+        if row:
+            return row[0]
+
+        row_user = conn.execute(
+            "SELECT custom_username FROM account_links WHERE discord_id = ?",
+            (clean_identifier,),
+        ).fetchone()
+        if row_user:
+            return clean_identifier
+
+    return clean_identifier
+
+
+def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price: float):
+    if total_paid <= 0 or buy_price <= 0:
+        raise ValueError("Total paid and buy price must be positive numbers.")
+
+    data.init_db()
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
-    total_paid = float(total_paid)
-    buy_price = float(buy_price)
-
-    if total_paid <= 0 or buy_price <= 0:
-        raise ValueError("Total paid and buy price must be positive.")
-
     shares = total_paid / buy_price
-    data.init_db()
 
-    with closing(data._connect()) as conn, conn:
+    with closing(data._connect()) as conn:
         row = conn.execute(
             "SELECT shares, buy_price FROM holdings WHERE user_id = ? AND ticker = ?",
             (user_id, ticker),
         ).fetchone()
 
-        if row:
-            old_shares, old_price = row
-            total_shares = old_shares + shares
-            avg_price = (old_shares * old_price + total_paid) / total_shares
+    if row:
+        existing_shares, existing_buy_price = row
+        new_shares = existing_shares + shares
+        total_cost = (existing_shares * existing_buy_price) + total_paid
+        new_avg_price = total_cost / new_shares
+        with closing(data._connect()) as conn, conn:
             conn.execute(
                 "UPDATE holdings SET shares = ?, buy_price = ? WHERE user_id = ? AND ticker = ?",
-                (total_shares, avg_price, user_id, ticker),
+                (new_shares, new_avg_price, user_id, ticker),
             )
-        else:
+    else:
+        with closing(data._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO holdings (user_id, ticker, shares, buy_price) VALUES (?, ?, ?, ?)",
                 (user_id, ticker, shares, buy_price),
             )
 
 
-def remove_holding(user_identifier, ticker, shares=None):
+def remove_holding(user_identifier: str, ticker: str, shares: float = None) -> bool:
+    data.init_db()
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
-    data.init_db()
 
-    with closing(data._connect()) as conn, conn:
+    with closing(data._connect()) as conn:
         row = conn.execute(
             "SELECT shares FROM holdings WHERE user_id = ? AND ticker = ?",
             (user_id, ticker),
         ).fetchone()
 
-        if not row:
-            return False
+    if not row:
+        return False
 
-        if shares is None or shares >= row[0]:
+    current_shares = row[0]
+
+    if shares is None or shares >= current_shares:
+        with closing(data._connect()) as conn, conn:
             conn.execute(
                 "DELETE FROM holdings WHERE user_id = ? AND ticker = ?",
                 (user_id, ticker),
             )
-        else:
+    else:
+        new_shares = current_shares - shares
+        with closing(data._connect()) as conn, conn:
             conn.execute(
                 "UPDATE holdings SET shares = ? WHERE user_id = ? AND ticker = ?",
-                (row[0] - shares, user_id, ticker),
+                (new_shares, user_id, ticker),
             )
-        return True
+
+    return True
 
 
-def get_portfolio(user_identifier):
-    user_id = resolve_user_id(user_identifier)
+def get_portfolio(user_identifier: str) -> list:
     data.init_db()
+    user_id = resolve_user_id(user_identifier)
 
     with closing(data._connect()) as conn:
         rows = conn.execute(
-            "SELECT ticker, shares, buy_price FROM holdings WHERE user_id = ? ORDER BY ticker",
+            "SELECT ticker, shares, buy_price FROM holdings WHERE user_id = ?",
             (user_id,),
         ).fetchall()
 
-    result = []
-    for ticker, shares, buy_price in rows:
-        item = {"ticker": ticker, "shares": shares, "buy_price": buy_price}
+    portfolio_list = []
+    for r in rows:
+        ticker, shares, buy_price = r[0], r[1], r[2]
+        item = {
+            "ticker": ticker,
+            "shares": shares,
+            "buy_price": buy_price,
+            "cost": shares * buy_price,
+        }
         try:
             quote = data.get_finnhub_quote(ticker)
-            price = float(quote.get("price", buy_price))
+            price = quote["price"]
+            item["price"] = price
+            item["value"] = shares * price
+            item["pl"] = item["value"] - item["cost"]
+            item["pl_pct"] = (item["pl"] / item["cost"] * 100) if item["cost"] > 0 else 0.0
         except Exception:
-            try:
-                price = float(data.get_daily(ticker)["close"].iloc[-1])
-            except Exception as e:
-                item.update(price=None, error=str(e))
-                result.append(item)
-                continue
+            item["price"] = buy_price
+            item["value"] = item["cost"]
+            item["pl"] = 0.0
+            item["pl_pct"] = 0.0
 
-        cost = shares * buy_price
-        value = shares * price
-        item.update(
-            price=price,
-            value=value,
-            cost=cost,
-            pl=value - cost,
-            pl_pct=(value - cost) / cost * 100 if cost > 0 else 0.0,
-        )
-        result.append(item)
-    return result
+        portfolio_list.append(item)
+
+    return portfolio_list

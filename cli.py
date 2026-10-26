@@ -1,3 +1,4 @@
+# cli.py
 import argparse
 import asyncio
 import io
@@ -122,14 +123,14 @@ class DashboardApp(App):
 
             with Horizontal(classes="control-row"):
                 yield Input(
-                    placeholder="Set Alert % (e.g. 1.5)",
+                    placeholder="Set Alert % (e.g. 0.1)",
                     id="input_threshold",
                     value="2.0",
                 )
                 yield Button("Set Threshold", id="btn_set_threshold", variant="success")
 
             with Horizontal(classes="control-row"):
-                yield Input(placeholder="Type command (e.g. !login matic)", id="input_cmd")
+                yield Input(placeholder="Type command (e.g. !check AAPL)", id="input_cmd")
                 yield Button("Run Command", id="btn_run_cmd", variant="primary")
 
             with Horizontal(classes="control-row"):
@@ -166,10 +167,10 @@ class DashboardApp(App):
         self.query_one("#status", Static).update(status_text)
 
     def update_watchlist_view(self) -> None:
-        watchlist = alerts.get_watchlist() or ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
-        lines = ["📈 [bold yellow]Watchlist Quick View[/bold yellow]"]
+        user_watchlist = alerts.get_watchlist(self.active_user_id) or ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
+        lines = [f"📈 [bold yellow]Watchlist Quick View ({self.active_user_id})[/bold yellow]"]
 
-        for ticker in watchlist:
+        for ticker in user_watchlist:
             try:
                 quote = data.get_finnhub_quote(ticker)
                 p = quote["price"]
@@ -181,6 +182,18 @@ class DashboardApp(App):
 
         self.query_one("#watchlist", Static).update("\n".join(lines))
 
+    def run_async_command(self, cmd_text: str):
+        coro = bot.execute_unified_command(self.active_user_id, cmd_text)
+        try:
+            running_loop = asyncio.get_running_loop()
+            running_loop.create_task(coro)
+        except RuntimeError:
+            try:
+                loop = getattr(bot.bot, "_loop", None) or asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(coro, loop)
+            except Exception:
+                asyncio.run(coro)
+
     def execute_custom_command(self, cmd_text: str) -> None:
         cmd_text = cmd_text.strip()
         if not cmd_text:
@@ -189,8 +202,6 @@ class DashboardApp(App):
         parts = cmd_text.split()
         cmd = parts[0].lower()
 
-        print(f"💻 [UI Command]: {cmd_text}")
-
         if cmd == "!login":
             if len(parts) < 2:
                 print(f"⚠️ Usage: `!login <user_id>` (Current: `{self.active_user_id}`)")
@@ -198,60 +209,11 @@ class DashboardApp(App):
                 self.active_user_id = parts[1]
                 set_cached_user(self.active_user_id)
                 self.update_status_view()
+                self.update_watchlist_view()
                 print(f"🔐 Switched active account to: [bold cyan]{self.active_user_id}[/bold cyan]")
-                self.execute_custom_command("!portfolio")
-
-        elif cmd == "!portfolio":
-            try:
-                holdings = portfolio.get_portfolio(self.active_user_id)
-                if not holdings:
-                    print(f"💼 Portfolio for account `{self.active_user_id}` is empty.")
-                    return
-
-                print(f"\n💼 [PORTFOLIO SUMMARY — Account: {self.active_user_id}]")
-                print("-" * 62)
-                print(f"{'Ticker':<8} | {'Shares':<8} | {'Avg Price':<10} | {'Current':<10} | {'P/L (€)':<10}")
-                print("-" * 62)
-
-                total_val, total_cost = 0.0, 0.0
-
-                for item in holdings:
-                    ticker = item["ticker"]
-                    shares = item["shares"]
-                    buy_price = item["buy_price"]
-                    curr_price = item.get("price", buy_price) or buy_price
-                    val = item.get("value", shares * curr_price)
-                    cost = item.get("cost", shares * buy_price)
-                    pl = item.get("pl", val - cost)
-
-                    total_val += val
-                    total_cost += cost
-                    print(f"{ticker:<8} | {shares:<8.2f} | €{buy_price:<9.2f} | €{curr_price:<9.2f} | €{pl:<+9.2f}")
-
-                total_pl = total_val - total_cost
-                total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0.0
-                print("-" * 62)
-                print(f"Total Value: €{total_val:.2f} | Total P/L: €{total_pl:+.2f} ({total_pl_pct:+.2f}%)\n")
-
-            except Exception as e:
-                print(f"❌ Portfolio Error: {e}")
-
-        elif cmd == "!scan":
-            print("🔍 Running manual signal scan across watchlist...")
-            watchlist = alerts.get_watchlist() or ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
-            for t in watchlist:
-                try:
-                    res = signals.analyze_ticker(t)
-                    display_n = res.get("display_name") or get_display_name(t)
-                    price = res.get("price", 0.0)
-                    pct = res.get("pct_change", 0.0)
-                    verdict = res.get("verdict", "N/A")
-
-                    color_tag = "green" if pct >= 0 else "red"
-                    circle = "🟢" if pct >= 0 else "🔴"
-                    print(f"-> {circle} [bold]{display_n:<8}[/bold] (€{price:.2f} | [{color_tag}]{pct:+.2f}%[/{color_tag}]): {verdict}")
-                except Exception as e:
-                    print(f"❌ {t} scan failed: {e}")
+                self.run_async_command("!portfolio")
+        else:
+            self.run_async_command(cmd_text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_set_threshold":
@@ -288,7 +250,6 @@ class DashboardApp(App):
 
 
 def start_bot_background():
-    """Explicitly launches the asyncio event loop for the Discord Bot in a background thread."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:

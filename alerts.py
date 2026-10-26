@@ -1,30 +1,61 @@
+# alerts.py
 from contextlib import closing
 import data
+import portfolio
 import signals
 
 
-def add_watchlist(ticker: str):
+def add_watchlist(user_identifier: str, ticker: str = None):
+    # Support both add_watchlist(ticker) and add_watchlist(user_id, ticker) for backward compatibility
+    if ticker is None:
+        ticker = user_identifier
+        user_identifier = "default_user"
+
     data.init_db()
+    user_id = portfolio.resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
     with closing(data._connect()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO watchlist (ticker) VALUES (?)", (ticker,))
+        conn.execute(
+            "INSERT OR REPLACE INTO watchlist (user_id, ticker) VALUES (?, ?)",
+            (user_id, ticker),
+        )
 
 
-def remove_watchlist(ticker: str):
+def remove_watchlist(user_identifier: str, ticker: str = None):
+    if ticker is None:
+        ticker = user_identifier
+        user_identifier = "default_user"
+
     data.init_db()
+    user_id = portfolio.resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
     with closing(data._connect()) as conn, conn:
-        conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
+        conn.execute(
+            "DELETE FROM watchlist WHERE user_id = ? AND ticker = ?",
+            (user_id, ticker),
+        )
 
 
-def get_watchlist() -> list:
+def get_watchlist(user_identifier: str = "default_user") -> list:
     data.init_db()
+    user_id = portfolio.resolve_user_id(user_identifier)
     with closing(data._connect()) as conn:
-        rows = conn.execute("SELECT ticker FROM watchlist ORDER BY ticker").fetchall()
+        rows = conn.execute(
+            "SELECT ticker FROM watchlist WHERE user_id = ? ORDER BY ticker",
+            (user_id,),
+        ).fetchall()
     return [r[0] for r in rows]
 
 
-def scan():
+def get_all_global_watchlists() -> list:
+    """Returns all unique tickers monitored across all users."""
+    data.init_db()
+    with closing(data._connect()) as conn:
+        rows = conn.execute("SELECT DISTINCT ticker FROM watchlist ORDER BY ticker").fetchall()
+    return [r[0] for r in rows]
+
+
+def scan(user_identifier: str = "default_user"):
     data.init_db()
 
     try:
@@ -32,7 +63,7 @@ def scan():
     except data.DataError as e:
         return [], [], [("USD/EUR", str(e))]
 
-    tickers = get_watchlist()
+    tickers = get_watchlist(user_identifier)
     buy_alerts = []
     sell_alerts = []
     errors = []

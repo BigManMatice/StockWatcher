@@ -163,7 +163,6 @@ def test_analyze_ticker_branches():
 def test_portfolio_full_lifecycle():
     user = "test_qa_user"
 
-    # Clean up any leftover database state from previous runs
     data.init_db()
     with closing(data._connect()) as conn, conn:
         conn.execute("DELETE FROM holdings WHERE user_id IN (?, '123456789')", (user,))
@@ -192,18 +191,18 @@ def test_portfolio_full_lifecycle():
 
 # --- 5. ALERTS MODULE ---
 def test_alerts_and_watchlist_scan():
-    alerts.add_watchlist("APC.DE")
-    assert "APC.DE" in alerts.get_watchlist()
+    alerts.add_watchlist("test_qa_user", "APC.DE")
+    assert "APC.DE" in alerts.get_watchlist("test_qa_user")
 
-    buy_alerts, sell_alerts, errors = alerts.scan()
+    buy_alerts, sell_alerts, errors = alerts.scan("test_qa_user")
     assert isinstance(buy_alerts, list)
     assert isinstance(sell_alerts, list)
 
-    alerts.remove_watchlist("APC.DE")
-    assert "APC.DE" not in alerts.get_watchlist()
+    alerts.remove_watchlist("test_qa_user", "APC.DE")
+    assert "APC.DE" not in alerts.get_watchlist("test_qa_user")
 
     with patch("data.get_usd_eur", side_effect=data.DataError("Mock USD/EUR failure")):
-        b, s, errs = alerts.scan()
+        b, s, errs = alerts.scan("test_qa_user")
         assert len(errs) > 0
 
 
@@ -238,7 +237,6 @@ async def test_bot_commands_and_events():
     await bot.connect_account(ctx, "test_qa_user")
     assert portfolio.resolve_user_id("test_qa_user") == "123456789"
 
-    # Reset test portfolio before testing bot add command
     with closing(data._connect()) as conn, conn:
         conn.execute("DELETE FROM holdings WHERE user_id = '123456789'")
 
@@ -266,6 +264,42 @@ async def test_bot_commands_and_events():
         bot.last_prices["APC.DE"] = 100.0
         with patch("data.get_finnhub_quote", return_value={"price": 110.0, "pct_change": 10.0}):
             await bot.minute_market_scanner()
+
+
+@pytest.mark.asyncio
+async def test_alert_spike_trigger_threshold():
+    bot.SPIKE_THRESHOLD_PCT = 0.1
+    bot.last_prices["APC.DE"] = 100.0
+
+    mock_log_channel = AsyncMock()
+    mock_alert_channel = AsyncMock()
+
+    def get_channel_side_effect(channel_id):
+        if channel_id == 12345:
+            return mock_log_channel
+        if channel_id == 67890:
+            return mock_alert_channel
+        return None
+
+    fake_quote = {
+        "ticker": "APC.DE",
+        "price": 105.0,
+        "prev_close": 100.0,
+        "pct_change": 5.0,
+    }
+
+    with patch("alerts.get_all_global_watchlists", return_value=["APC.DE"]), \
+         patch("data.get_finnhub_quote", return_value=fake_quote), \
+         patch.object(bot.bot, "get_channel", side_effect=get_channel_side_effect), \
+         patch("bot.LOG_CHANNEL_ID", 12345), \
+         patch("bot.ALERT_CHANNEL_ID", 67890):
+
+        await bot.minute_market_scanner()
+
+        mock_alert_channel.send.assert_called_once()
+        called_embed = mock_alert_channel.send.call_args[1]["embed"]
+        assert "Price Spike Alert!" in called_embed.title
+        assert "APC.DE" in called_embed.description
 
 
 # --- 7. CLI & TEXTUAL UI DASHBOARD ---

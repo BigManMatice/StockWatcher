@@ -53,10 +53,19 @@ def init_db():
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS watchlist (
-                ticker TEXT PRIMARY KEY
+                user_id TEXT NOT NULL DEFAULT 'default_user',
+                ticker TEXT NOT NULL,
+                PRIMARY KEY (user_id, ticker)
             )
             """
         )
+        
+        # Schema migration check: Ensure legacy watchlist table gets user_id column if needed
+        cursor = conn.execute("PRAGMA table_info(watchlist)")
+        w_cols = [c[1] for c in cursor.fetchall()]
+        if "user_id" not in w_cols:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN user_id TEXT DEFAULT 'default_user'")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS holdings (
