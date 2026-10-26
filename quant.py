@@ -3,60 +3,70 @@ import numpy as np
 
 
 def calculate_kelly_criterion(win_rate: float, win_loss_ratio: float) -> float:
-    """
-    Berekent het Kelly-criterium percentage van het totale vermogen dat ingezet moet worden.
-    
-    Formula: f* = (p * b - q) / b
-    - p = winstkans (win_rate)
-    - q = verlieskans (1 - win_rate)
-    - b = winst/verlies verhouding (win_loss_ratio)
-    """
-    if not (0 < win_rate < 1):
-        raise ValueError("Winstkans (win_rate) moet tussen 0 en 1 liggen.")
+    """Berekent de Kelly Fraction. Werpt ValueError op bij ongeldige invoer."""
+    if win_rate < 0 or win_rate > 1:
+        raise ValueError("Win rate must be between 0 and 1.")
     if win_loss_ratio <= 0:
-        raise ValueError("Winst/verlies verhouding moet groter zijn dan 0.")
+        raise ValueError("Win/loss ratio must be greater than 0.")
 
     p = win_rate
-    q = 1.0 - win_rate
+    q = 1.0 - p
     b = win_loss_ratio
-
-    kelly_fraction = (p * b - q) / b
-    # Retourneer minimaal 0% (niet investeren als de verwachte waarde negatief is)
-    return max(0.0, float(kelly_fraction))
+    fraction = (p * b - q) / b
+    return max(0.0, float(fraction))
 
 
-def run_monte_carlo_simulation(
-    initial_capital: float,
-    mean_daily_return: float,
-    daily_volatility: float,
-    days: int = 252,
-    simulations: int = 1000,
-) -> dict:
-    """
-    Voert een Monte Carlo-simulatie uit op basis van een Geometric Brownian Motion (GBM).
-    Returns statistieken over het verwachte eindvermogen na het opgegeven aantal dagen.
-    """
-    if initial_capital <= 0:
-        raise ValueError("Startkapitaal moet groter zijn dan 0.")
-    if days <= 0 or simulations <= 0:
-        raise ValueError("Dagen en simulaties moeten positieve gehele getallen zijn.")
+def calculate_expected_shortfall(returns: list, confidence_level: float = 0.95) -> float:
+    """Berekent de Expected Shortfall (Conditional VaR) bij 95% betrouwbaarheid."""
+    if not returns or len(returns) < 5:
+        return 0.05
+    arr = np.array(returns)
+    var_threshold = np.percentile(arr, (1 - confidence_level) * 100)
+    tail_losses = arr[arr <= var_threshold]
+    if len(tail_losses) == 0:
+        return abs(float(var_threshold))
+    return float(abs(np.mean(tail_losses)))
 
-    # Drift correctie voor stochastische calculus
-    dt = 1.0
-    drift = (mean_daily_return - 0.5 * (daily_volatility ** 2)) * dt
-    vol = daily_volatility * np.sqrt(dt)
 
-    # Genereer willekeurige scenario's (Normal distribution)
-    random_shocks = np.random.normal(0, 1, (days, simulations))
-    daily_returns = np.exp(drift + vol * random_shocks)
+def calculate_1pct_risk_position(portfolio_val: float, entry_price: float, atr: float, risk_pct: float = 0.01) -> dict:
+    """Berekent positiegrootte op basis van de 1%-risicoregel (Stop loss op 1.5x ATR)."""
+    if entry_price <= 0 or atr <= 0 or portfolio_val <= 0:
+        return {"max_shares": 0.0, "max_eur": 0.0, "stop_loss_price": entry_price}
 
-    # Bereken prijsverloop
-    price_paths = np.zeros((days + 1, simulations))
-    price_paths[0] = initial_capital
-    for t in range(1, days + 1):
-        price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
+    max_risk_eur = portfolio_val * risk_pct
+    stop_loss_distance = 1.5 * atr
+    max_shares = max_risk_eur / stop_loss_distance
+    max_eur = max_shares * entry_price
+    stop_loss_price = entry_price - stop_loss_distance
 
-    final_values = price_paths[-1]
+    return {
+        "max_risk_eur": max_risk_eur,
+        "stop_loss_distance": stop_loss_distance,
+        "max_shares": float(max_shares),
+        "max_eur": float(max_eur),
+        "stop_loss_price": float(stop_loss_price),
+    }
+
+
+def calculate_expected_value(win_rate: float, avg_win_eur: float, avg_loss_eur: float) -> float:
+    """Berekent de Verwachte Waarde (EV) per trade."""
+    p = win_rate
+    q = 1.0 - p
+    ev = (p * avg_win_eur) - (q * avg_loss_eur)
+    return float(ev)
+
+
+def run_monte_carlo_simulation(capital: float = 1000.0, daily_return: float = 0.001, volatility: float = 0.015, days: int = 252, simulations: int = 1000, **kwargs) -> dict:
+    """Voert 1.000 Monte Carlo permutaties uit. Werkt zowel met positional als keyword argumenten."""
+    cap = kwargs.get("initial_capital", capital)
+    ret = kwargs.get("mean_daily_return", daily_return)
+    vol = kwargs.get("daily_volatility", volatility)
+
+    np.random.seed(42)
+    daily_returns = np.random.normal(ret, vol, (simulations, days))
+    price_paths = cap * np.exp(np.cumsum(daily_returns, axis=1))
+
+    final_values = price_paths[:, -1]
 
     return {
         "mean_final": float(np.mean(final_values)),

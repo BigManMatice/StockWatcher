@@ -336,6 +336,8 @@ def analyze_ticker(ticker: str) -> dict:
 
 
 
+# signals.py - Toevoeging/Update van analyze_ticker_advanced
+
 def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) -> dict:
     api_ticker = get_mapped_ticker(ticker)
     df = data.get_daily(api_ticker)
@@ -345,6 +347,17 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) 
     early_warnings = detect_early_warnings(df, price)
     base_analysis = analyze_ticker(ticker)
 
+    atr = base_analysis.get("atr", price * 0.02)
+    pivots = base_analysis.get("pivots", {"r1": price * 1.02, "s1": price * 0.98})
+
+    # 1. Dynamische Risk/Reward Ratio (RRR) berekenen via Pivot Points
+    risk_dist = max(0.01, price - pivots["s1"])
+    reward_dist = max(0.01, pivots["r1"] - price)
+    dynamic_rrr = float(reward_dist / risk_dist) if risk_dist > 0 else 1.5
+
+    # Begrens RRR tussen 1.10 en 3.00 voor realistische kwantitatieve grenzen
+    dynamic_rrr = max(1.10, min(3.00, dynamic_rrr))
+
     # Bepaal Actie Advies
     action = "HOLD ⚖️"
     if any("Pre-Buy" in w or "Testing Resistance" in w or "Bollinger Squeeze" in w for w in early_warnings):
@@ -352,22 +365,30 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) 
     elif any("Pre-Sell" in w or "Testing Support" in w for w in early_warnings):
         action = "SELL 🔴 (Verkoopsignaal / Top inzicht)"
 
-    # Dynamische Winstkans schatting op basis van technische signaalsterkte
+    # 2. Dynamische Winstkans schatting op basis van technische signaalsterkte
     reasons_count = len(base_analysis.get("reasons", []))
     if "BUY" in action:
-        win_rate = min(0.70, 0.50 + (reasons_count * 0.05))  # Schaalt tussen 50% en 70%
-        win_loss_ratio = 1.8  # Betere Risk/Reward bij sterke bodems
+        win_rate = min(0.70, 0.50 + (reasons_count * 0.04))
     elif "SELL" in action:
-        win_rate = min(0.65, 0.50 + (reasons_count * 0.04))
-        win_loss_ratio = 1.2
+        win_rate = min(0.65, 0.50 + (reasons_count * 0.03))
     else:
         win_rate = 0.50
-        win_loss_ratio = 1.0
 
-    kelly_fraction = quant.calculate_kelly_criterion(win_rate, win_loss_ratio)
+    # 3. Kelly position sizing
+    kelly_fraction = quant.calculate_kelly_criterion(win_rate, dynamic_rrr)
     kelly_pct = kelly_fraction * 100.0
     kelly_eur = portfolio_total_value * kelly_fraction
-    kelly_shares = (kelly_eur / price) if price > 0 else 0.0
+
+    # 4. Harde 1%-Risicoregel op basis van ATR Stop-Loss
+    risk_rule_1pct = quant.calculate_1pct_risk_position(portfolio_total_value, price, atr, risk_pct=0.01)
+
+    # 5. Expected Shortfall (Tail Risk)
+    daily_returns = df["close"].pct_change().dropna().tolist() if "close" in df.columns else []
+    cvar_95 = quant.calculate_expected_shortfall(daily_returns, confidence_level=0.95) * 100.0
+
+    # Uiteindelijk aanbevolen aandelen (minimum van Kelly en 1%-Rule voor maximale veiligheid)
+    safe_shares = min(kelly_eur / price if price > 0 else 0.0, risk_rule_1pct["max_shares"])
+    safe_eur = safe_shares * price
 
     return {
         "ticker": ticker,
@@ -377,8 +398,11 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) 
         "early_warnings": early_warnings,
         "action": action,
         "win_rate": win_rate * 100.0,
-        "win_loss_ratio": win_loss_ratio,
+        "win_loss_ratio": dynamic_rrr,
         "kelly_pct": kelly_pct,
         "kelly_eur": kelly_eur,
-        "kelly_shares": kelly_shares,
+        "risk_rule_1pct": risk_rule_1pct,
+        "cvar_95": cvar_95,
+        "safe_shares": safe_shares,
+        "safe_eur": safe_eur,
     }

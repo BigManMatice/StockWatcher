@@ -159,10 +159,10 @@ async def minute_market_scanner():
         watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
         now = datetime.utcnow()
 
-        # Update historische resultaten van eerdere alerts (1d, 3d, 7d)
+        # 1. Update de status van historische alerts in de SQLite database (1d, 3d, 7d uitkomsten)
         await asyncio.to_thread(tracker.update_alert_outcomes)
 
-        # Bereken huidige totale portfolio waarde voor dynamische Kelly sizing
+        # 2. Bereken huidige totale portfoliowaarde voor dynamische position sizing
         holdings = portfolio.get_portfolio("default_user")
         tot_portfolio_val = sum(h.get("value", h["shares"] * h["buy_price"]) for h in holdings) if holdings else 298.00
 
@@ -172,7 +172,7 @@ async def minute_market_scanner():
                 quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
                 price = quote["price"]
 
-                # 1. Price Spike Alert Check
+                # --- 1. PRICE SPIKE ALERT CHECK ---
                 if ticker in last_prices:
                     prev_price = last_prices[ticker]
                     spike_pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
@@ -207,7 +207,7 @@ async def minute_market_scanner():
 
                 last_prices[ticker] = price
 
-                # 2. Quant Early Warning Scan
+                # --- 2. QUANT EARLY WARNING SCAN ---
                 res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker, tot_portfolio_val)
                 warnings = res.get("early_warnings", [])
 
@@ -226,8 +226,8 @@ async def minute_market_scanner():
                     price_diff_pct = abs((price - tracker_state["last_price"]) / tracker_state["last_price"] * 100) if tracker_state["last_price"] > 0 else 0.0
 
                     # Stuur Discord alert als:
-                    # - 20 minuten voorbij zijn en NIET muted, OF
-                    # - Koers nog meer beweegt (>= 1.0% breakout verschil)
+                    # - 20 minuten voorbij zijn en NIET gemuted, OF
+                    # - De koers nog meer beweegt (>= 1.0% breakout verschil)
                     should_send_alert = (time_since_last >= timedelta(minutes=20) and not is_muted) or (price_diff_pct >= 1.0)
 
                     if should_send_alert:
@@ -235,10 +235,10 @@ async def minute_market_scanner():
                         embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
                         primary_warning = warnings[0]
 
-                        # Log signaal naar database
+                        # Log signaal naar de SQLite database voor historisch zekerheidstracking
                         await asyncio.to_thread(tracker.log_alert, ticker, primary_warning, action_text, price)
 
-                        # Haal historische statistieken op van dit type signaal
+                        # Haal historische precisie statistieken op van dit specifieke type signaal
                         hist_stats = await asyncio.to_thread(tracker.get_accuracy_stats, primary_warning)
 
                         warning_embed = discord.Embed(
@@ -254,15 +254,15 @@ async def minute_market_scanner():
                             timestamp=discord.utils.utcnow(),
                         )
                         warning_embed.add_field(
-                            name="🎲 Kelly-Criterium (Werkelijk Portfolio Advies)",
+                            name="🎲 Quant Risicobeheer & Position Sizing",
                             value=(
                                 f"```yaml\n"
                                 f"Portfoliowaarde:     € {tot_portfolio_val:.2f}\n"
                                 f"Winstkans Schatting: {res['win_rate']:.1f}%\n"
-                                f"Risk/Reward Ratio:   {res['win_loss_ratio']:.2f}\n"
-                                f"Aanbevolen Inzet:    {res['kelly_pct']:.2f}% van vermogen\n"
-                                f"Max Bedrag:          € {res.get('kelly_eur', 0.0):.2f}\n"
-                                f"Aantal Aandelen:     {res.get('kelly_shares', 0.0):.4f} stuks\n"
+                                f"Dynamische RRR:      {res['win_loss_ratio']:.2f}\n"
+                                f"Tail Risk (CVaR 95): {res['cvar_95']:.2f}%\n"
+                                f"Max 1% Risico-Inzet: € {res['risk_rule_1pct']['max_eur']:.2f} ({res['risk_rule_1pct']['max_shares']:.4f} stuks)\n"
+                                f"Stop-Loss Koers:     € {res['risk_rule_1pct']['stop_loss_price']:.2f}\n"
                                 f"```"
                             ),
                             inline=False,
@@ -295,6 +295,10 @@ async def minute_market_scanner():
     except Exception as outer_err:
         print(f"[Scanner Outer Error]: {outer_err}")
 
+
+@minute_market_scanner.before_loop
+async def before_scanner():
+    await bot.wait_until_ready()
 
 @bot.event
 async def on_ready():
