@@ -384,12 +384,16 @@ async def watchlist(ctx):
 
 @bot.command(name="scan")
 async def scan_watchlist(ctx):
-    """Scans all tickers in the watchlist for technical signals with colored embeds."""
-    watchlist_items = ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
+    """Scans all tickers in alerts.get_watchlist() with full technical indicators."""
+    watchlist_items = alerts.get_watchlist()
+
+    if not watchlist_items:
+        await ctx.send("⚠️ Watchlist is empty. Add tickers using `!watch TICKER`.")
+        return
 
     async with ctx.typing():
         embed = discord.Embed(
-            title="🔍 Technical Signal Scan (EUR)",
+            title="🔍 Technical Analysis Scan (EUR)",
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
@@ -400,19 +404,18 @@ async def scan_watchlist(ctx):
                 display_n = res.get("display_name") or get_display_name(ticker)
                 price = res.get("price", 0.0)
                 pct = res.get("pct_change", 0.0)
-                signal_str = res.get("signal") or res.get("verdict", "N/A")
+                verdict = res.get("verdict", "NEUTRAL")
 
-                # Dynamic emoji based on percent change / signal
                 circle = "🟢" if pct >= 0 else "🔴"
-
-                # If display name differs from raw ticker, format as "AAPL (APC.DE)"
-                if display_n != ticker:
-                    label = f"{display_n} ({ticker})"
-                else:
-                    label = ticker
+                label = f"{display_n} ({ticker})" if display_n != ticker else ticker
 
                 field_name = f"{circle} {label} — €{price:.2f} ({pct:+.2f}%)"
-                field_value = f"**Signal:** {signal_str}"
+                field_value = (
+                    f"**Verdict:** {verdict}\n"
+                    f"• **RSI:** `{res.get('rsi', 0):.1f}` | **ATR (Volatility):** `€{res.get('atr', 0):.2f}`\n"
+                    f"• **Stoch %K:** `{res['stochastic']['k']:.1f}` | **OBV:** `{res['obv']['trend'].title()}`\n"
+                    f"• **Key Reasons:** {', '.join(res.get('reasons', [])[:2])}"
+                )
 
                 embed.add_field(name=field_name, value=field_value, inline=False)
 

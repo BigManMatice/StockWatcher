@@ -22,24 +22,20 @@ def _connect():
 
 def init_db():
     with closing(_connect()) as conn, conn:
+        # Create or update prices table to include full OHLCV metrics
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS prices (
-                ticker TEXT,
-                date TEXT,
-                close REAL,
+                ticker TEXT NOT NULL,
+                date TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL NOT NULL,
+                volume REAL,
                 PRIMARY KEY (ticker, date)
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS fx (
-                pair TEXT PRIMARY KEY,
-                rate REAL NOT NULL,
-                fetched_on TEXT NOT NULL
-            )
-            """
+        """
         )
 
 
@@ -183,7 +179,7 @@ def get_finnhub_quote(ticker: str) -> dict:
 
 
 def get_daily(ticker: str) -> pd.DataFrame:
-    """Return DataFrame from local SQLite history, automatically backfilling 1y history via yfinance if needed."""
+    """Return DataFrame from local SQLite history with full OHLCV columns, backfilling 1y history via yfinance if needed."""
     ticker = ticker.upper().strip()
     api_ticker = get_mapped_ticker(ticker)
     init_db()
@@ -191,15 +187,15 @@ def get_daily(ticker: str) -> pd.DataFrame:
     # 1. Query local SQLite database
     with closing(_connect()) as conn:
         df = pd.read_sql_query(
-            "SELECT date, close FROM prices WHERE ticker = ? ORDER BY date",
+            "SELECT date, open, high, low, close, volume FROM prices WHERE ticker = ? ORDER BY date",
             conn,
             params=(ticker,),
             parse_dates=["date"],
             index_col="date",
         )
 
-    # 2. Backfill 1 year of daily history if database has fewer than 20 rows
-    if len(df) < 20:
+    # 2. Backfill 1 year of daily history if database has fewer than 20 rows or missing high/low columns
+    if len(df) < 20 or df["high"].isnull().all():
         try:
             stock = yf.Ticker(api_ticker)
             hist = stock.history(period="1y")
@@ -208,19 +204,32 @@ def get_daily(ticker: str) -> pd.DataFrame:
                 records = []
                 for dt, row in hist.iterrows():
                     d_str = dt.strftime("%Y-%m-%d")
-                    records.append((ticker, d_str, float(row["Close"])))
+                    records.append(
+                        (
+                            ticker,
+                            d_str,
+                            float(row.get("Open", row["Close"])),
+                            float(row.get("High", row["Close"])),
+                            float(row.get("Low", row["Close"])),
+                            float(row["Close"]),
+                            float(row.get("Volume", 0)),
+                        )
+                    )
 
                 # Batch insert missing historical snapshots
                 with closing(_connect()) as conn, conn:
                     conn.executemany(
-                        "INSERT OR REPLACE INTO prices (ticker, date, close) VALUES (?, ?, ?)",
+                        """
+                        INSERT OR REPLACE INTO prices (ticker, date, open, high, low, close, volume) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
                         records,
                     )
 
                 # Re-query SQLite to get the updated history
                 with closing(_connect()) as conn:
                     df = pd.read_sql_query(
-                        "SELECT date, close FROM prices WHERE ticker = ? ORDER BY date",
+                        "SELECT date, open, high, low, close, volume FROM prices WHERE ticker = ? ORDER BY date",
                         conn,
                         params=(ticker,),
                         parse_dates=["date"],
@@ -240,6 +249,8 @@ def get_daily(ticker: str) -> pd.DataFrame:
 
     if not is_european:
         eur_rate = get_usd_eur()
-        df["close"] = df["close"] * eur_rate
+        for col in ["open", "high", "low", "close"]:
+            if col in df.columns:
+                df[col] = df[col] * eur_rate
 
     return df
