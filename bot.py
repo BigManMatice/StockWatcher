@@ -109,6 +109,34 @@ async def view_alert_threshold(ctx):
     )
     await ctx.send(embed=embed)
 
+import tracker
+
+@bot.command(name="accuracy")
+async def show_accuracy(ctx):
+    """Toont het historische zekerheidspercentage en de accuraatheid van de bot."""
+    async with ctx.typing():
+        tracker.update_alert_outcomes()
+        stats = tracker.get_accuracy_stats()
+
+        embed = discord.Embed(
+            title="🎯 BOT SIGNALS ACCURACY TRACKER",
+            description="## Historische Betrouwbaarheid & Performance Tracker\nResultaten van uitgezonden alerts vergeleken met marktkoersen.",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="📊 Totale Model Statistieken",
+            value=(
+                f"```yaml\n"
+                f"Zekerheidspercentage: {stats['accuracy_pct']:.1f}%\n"
+                f"Totaal Geëvalueerd:    {stats['total']} alerts\n"
+                f"Winstgevende Signals: {stats['wins']} keer correct\n"
+                f"```"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="StockWatcher Quantitative Validation Engine")
+        await ctx.send(embed=embed)
 
 @tasks.loop(minutes=1)
 async def minute_market_scanner():
@@ -130,6 +158,9 @@ async def minute_market_scanner():
         target_send_channel = alert_channel or log_channel
         watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
         now = datetime.utcnow()
+
+        # Update historische resultaten van eerdere alerts (1d, 3d, 7d)
+        await asyncio.to_thread(tracker.update_alert_outcomes)
 
         # Bereken huidige totale portfolio waarde voor dynamische Kelly sizing
         holdings = portfolio.get_portfolio("default_user")
@@ -184,15 +215,15 @@ async def minute_market_scanner():
                     # Log iedere minuut naar de console/terminal
                     print(f"[SCAN LOG {now.strftime('%H:%M:%S')}] {ticker}: {res.get('action', 'HOLD')} | {warnings[0]}")
 
-                    tracker = alert_tracker.get(ticker, {
+                    tracker_state = alert_tracker.get(ticker, {
                         "last_sent": datetime.min,
                         "last_price": price,
                         "muted_until": datetime.min
                     })
 
-                    time_since_last = now - tracker["last_sent"]
-                    is_muted = now < tracker["muted_until"]
-                    price_diff_pct = abs((price - tracker["last_price"]) / tracker["last_price"] * 100) if tracker["last_price"] > 0 else 0.0
+                    time_since_last = now - tracker_state["last_sent"]
+                    is_muted = now < tracker_state["muted_until"]
+                    price_diff_pct = abs((price - tracker_state["last_price"]) / tracker_state["last_price"] * 100) if tracker_state["last_price"] > 0 else 0.0
 
                     # Stuur Discord alert als:
                     # - 20 minuten voorbij zijn en NIET muted, OF
@@ -202,6 +233,13 @@ async def minute_market_scanner():
                     if should_send_alert:
                         action_text = res.get("action", "HOLD ⚖️")
                         embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
+                        primary_warning = warnings[0]
+
+                        # Log signaal naar database
+                        await asyncio.to_thread(tracker.log_alert, ticker, primary_warning, action_text, price)
+
+                        # Haal historische statistieken op van dit type signaal
+                        hist_stats = await asyncio.to_thread(tracker.get_accuracy_stats, primary_warning)
 
                         warning_embed = discord.Embed(
                             title=f"🚨 QUANT EARLY WARNING ALERT",
@@ -220,11 +258,18 @@ async def minute_market_scanner():
                             value=(
                                 f"```yaml\n"
                                 f"Portfoliowaarde:     € {tot_portfolio_val:.2f}\n"
+                                f"Winstkans Schatting: {res['win_rate']:.1f}%\n"
+                                f"Risk/Reward Ratio:   {res['win_loss_ratio']:.2f}\n"
                                 f"Aanbevolen Inzet:    {res['kelly_pct']:.2f}% van vermogen\n"
                                 f"Max Bedrag:          € {res.get('kelly_eur', 0.0):.2f}\n"
                                 f"Aantal Aandelen:     {res.get('kelly_shares', 0.0):.4f} stuks\n"
                                 f"```"
                             ),
+                            inline=False,
+                        )
+                        warning_embed.add_field(
+                            name="📊 Model Zekerheid (Historische Data)",
+                            value=f"• **Historische Precisie:** `{hist_stats['accuracy_pct']:.1f}%` ({hist_stats['wins']}/{hist_stats['total']} winstgevend voorspeld)",
                             inline=False,
                         )
                         warning_embed.add_field(
@@ -241,7 +286,7 @@ async def minute_market_scanner():
                         alert_tracker[ticker] = {
                             "last_sent": now,
                             "last_price": price,
-                            "muted_until": tracker["muted_until"] if not (price_diff_pct >= 1.0) else datetime.min,
+                            "muted_until": tracker_state["muted_until"] if not (price_diff_pct >= 1.0) else datetime.min,
                         }
 
             except Exception as e:
@@ -249,11 +294,6 @@ async def minute_market_scanner():
 
     except Exception as outer_err:
         print(f"[Scanner Outer Error]: {outer_err}")
-
-
-@minute_market_scanner.before_loop
-async def before_scanner():
-    await bot.wait_until_ready()
 
 
 @bot.event

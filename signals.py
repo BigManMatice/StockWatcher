@@ -335,6 +335,7 @@ def analyze_ticker(ticker: str) -> dict:
 
 
 
+
 def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) -> dict:
     api_ticker = get_mapped_ticker(ticker)
     df = data.get_daily(api_ticker)
@@ -342,17 +343,27 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) 
     price = float(quote["price"])
 
     early_warnings = detect_early_warnings(df, price)
+    base_analysis = analyze_ticker(ticker)
 
-    # Bepaal Advies Action: KOOP (BUY 🟢) of VERKOOP (SELL 🔴)
+    # Bepaal Actie Advies
     action = "HOLD ⚖️"
     if any("Pre-Buy" in w or "Testing Resistance" in w or "Bollinger Squeeze" in w for w in early_warnings):
         action = "BUY 🟢 (Koopsignaal / Bodem inzicht)"
     elif any("Pre-Sell" in w or "Testing Support" in w for w in early_warnings):
         action = "SELL 🔴 (Verkoopsignaal / Top inzicht)"
 
-    # Kelly Sizing op basis van werkelijk portfolio-kapitaal
-    win_rate = 0.55
-    win_loss_ratio = 1.5
+    # Dynamische Winstkans schatting op basis van technische signaalsterkte
+    reasons_count = len(base_analysis.get("reasons", []))
+    if "BUY" in action:
+        win_rate = min(0.70, 0.50 + (reasons_count * 0.05))  # Schaalt tussen 50% en 70%
+        win_loss_ratio = 1.8  # Betere Risk/Reward bij sterke bodems
+    elif "SELL" in action:
+        win_rate = min(0.65, 0.50 + (reasons_count * 0.04))
+        win_loss_ratio = 1.2
+    else:
+        win_rate = 0.50
+        win_loss_ratio = 1.0
+
     kelly_fraction = quant.calculate_kelly_criterion(win_rate, win_loss_ratio)
     kelly_pct = kelly_fraction * 100.0
     kelly_eur = portfolio_total_value * kelly_fraction
@@ -365,6 +376,8 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) 
         "pct_change": float(quote.get("pct_change", 0.0)),
         "early_warnings": early_warnings,
         "action": action,
+        "win_rate": win_rate * 100.0,
+        "win_loss_ratio": win_loss_ratio,
         "kelly_pct": kelly_pct,
         "kelly_eur": kelly_eur,
         "kelly_shares": kelly_shares,
