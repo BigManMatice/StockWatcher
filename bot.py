@@ -75,6 +75,8 @@ async def view_alert_threshold(ctx):
     await ctx.send(embed=embed)
 
 
+# bot.py (Updated minute_market_scanner loop)
+
 @tasks.loop(minutes=1)
 async def minute_market_scanner():
     try:
@@ -92,13 +94,7 @@ async def minute_market_scanner():
             except Exception as e:
                 print(f"[Alert Warning] Could not find alert channel: {e}")
 
-        watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "NVD.DE", "SXR8.DE"]
-
-        embed = discord.Embed(
-            title="📈 Watchlist Live Status",
-            color=discord.Color.blue(),
-            timestamp=discord.utils.utcnow(),
-        )
+        watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
 
         for ticker in watchlist_items:
             display_name = get_display_name(ticker)
@@ -106,8 +102,8 @@ async def minute_market_scanner():
                 quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
                 price = quote["price"]
                 pct = quote["pct_change"]
-                icon = "🟢" if pct >= 0 else "🔴"
 
+                # Check price spike threshold against last known price
                 if ticker in last_prices:
                     prev_price = last_prices[ticker]
                     spike_pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
@@ -125,29 +121,34 @@ async def minute_market_scanner():
                             color=discord.Color.gold() if spike_pct > 0 else discord.Color.dark_red(),
                             timestamp=discord.utils.utcnow(),
                         )
-                        
                         target = alert_channel or log_channel
                         if target:
                             await target.send(embed=alert_embed)
 
                 last_prices[ticker] = price
 
-                embed.add_field(
-                    name=f"{icon} {display_name}",
-                    value=f"**€{price:.2f}** · ({pct:+.2f}%)",
-                    inline=False,
-                )
-            except Exception as e:
-                embed.add_field(
-                    name=f"⚠️ {display_name}",
-                    value=f"Error: {e}",
-                    inline=False,
-                )
+                # Run advanced early warning scan
+                res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker)
+                if res.get("early_warnings"):
+                    target = alert_channel or log_channel
+                    embed = discord.Embed(
+                        title=f"🚨 Early Warning Signal: {res['display_name']}",
+                        description=f"Koers: **€{res['price']:.2f}** ({res['pct_change']:+.2f}%)\n\n" + "\n".join(res["early_warnings"]),
+                        color=discord.Color.gold(),
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    embed.add_field(
+                        name="🎲 Quant Risk Advies (Kelly)",
+                        value=f"Advies positiegrootte: **`{res['kelly_pct']:.2f}%`** van je vermogen.",
+                        inline=False,
+                    )
+                    await target.send(embed=embed)
 
-        await log_channel.send(embed=embed)
+            except Exception as e:
+                print(f"[Scanner Error] {ticker}: {e}")
 
     except Exception as outer_err:
-        print(f"[Logger Outer Error]: {outer_err}")
+        print(f"[Scanner Outer Error]: {outer_err}")
 
 
 @minute_market_scanner.before_loop

@@ -1,7 +1,10 @@
+# signals.py
 import numpy as np
 import pandas as pd
+
 import data
-from stockName import get_mapped_ticker, get_display_name
+import quant
+from stockName import get_display_name, get_mapped_ticker
 
 
 def calculate_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -124,6 +127,59 @@ def calculate_pivot_points(df: pd.DataFrame) -> dict:
         "r2": pivot + (prev_high - prev_low),
         "s2": pivot - (prev_high - prev_low),
     }
+
+
+def detect_early_warnings(df: pd.DataFrame, current_price: float) -> list:
+    """Detecteert patronen die wijzen op een aanstaande koersuitbraak (vóór het gebeurt)."""
+    warnings = []
+
+    if len(df) < 14:
+        return warnings
+
+    close = df["close"]
+    high = df["high"] if "high" in df.columns else close
+    low = df["low"] if "low" in df.columns else close
+
+    # Dynamic rolling windows for variable dataframe lengths (e.g., unit test data)
+    window_bb = min(20, len(df))
+    window_quantile = min(50, len(df))
+
+    # 1. Bollinger Band Squeeze (Volatiliteit droogt op -> grote beweging op komst)
+    ma = close.rolling(window_bb).mean()
+    std = close.rolling(window_bb).std()
+    upper_band = ma + (std * 2)
+    lower_band = ma - (std * 2)
+    bandwidth = (upper_band - lower_band) / ma
+
+    min_bw = bandwidth.rolling(window_quantile, min_periods=5).quantile(0.20).iloc[-1]
+    curr_bw = bandwidth.iloc[-1]
+
+    if pd.notna(curr_bw) and pd.notna(min_bw) and curr_bw <= min_bw:
+        warnings.append("⚠️ **Bollinger Squeeze:** Volatiliteit is extreem laag. Een grote koersuitbraak staat op uitbreken!")
+
+    # 2. RSI Divergentie / Approaching Oversold/Overbought
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14, min_periods=5).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=5).mean()
+    rs = gain / (loss.replace(0, 1e-9))
+    rsi = 100 - (100 / (1 + rs))
+    current_rsi = rsi.iloc[-1] if not rsi.empty else 50.0
+
+    if 30 <= current_rsi <= 35:
+        warnings.append(f"⚠️ **Pre-Buy Warning:** RSI is bijna oversold ({current_rsi:.1f}). Mogelijk bodemsignaal nabij!")
+    elif 65 <= current_rsi <= 70:
+        warnings.append(f"⚠️ **Pre-Sell Warning:** RSI is bijna overbought ({current_rsi:.1f}). Mogelijk top bereikt!")
+
+    # 3. Near Resistance / Support Breakout
+    recent_high = high.tail(20).max()
+    recent_low = low.tail(20).min()
+
+    if current_price >= recent_high * 0.99 and current_price <= recent_high:
+        warnings.append("⚠️ **Testing Resistance:** Koers test de weerstand. Mogelijke opwaartse uitbraak!")
+    elif current_price <= recent_low * 1.01 and current_price >= recent_low:
+        warnings.append("⚠️ **Testing Support:** Koers test de steun. Mogelijke neerwaartse uitbraak!")
+
+    return warnings
 
 
 def analyze_ticker(ticker: str) -> dict:
@@ -264,3 +320,28 @@ def analyze_ticker(ticker: str) -> dict:
 
     except Exception as e:
         raise RuntimeError(f"Error processing {ticker}: {e}")
+
+
+def analyze_ticker_advanced(ticker: str) -> dict:
+    """Uitgebreide analyse inclusief Kelly sizing en Early Warning alerts."""
+    api_ticker = get_mapped_ticker(ticker)
+    df = data.get_daily(api_ticker)
+    quote = data.get_finnhub_quote(api_ticker)
+    price = float(quote["price"])
+
+    early_warnings = detect_early_warnings(df, price)
+
+    # Standard quantitative expectation parameters
+    win_rate = 0.55
+    win_loss_ratio = 1.5
+
+    kelly_pct = quant.calculate_kelly_criterion(win_rate, win_loss_ratio) * 100.0
+
+    return {
+        "ticker": ticker,
+        "display_name": get_display_name(ticker),
+        "price": price,
+        "pct_change": float(quote.get("pct_change", 0.0)),
+        "early_warnings": early_warnings,
+        "kelly_pct": kelly_pct,
+    }
