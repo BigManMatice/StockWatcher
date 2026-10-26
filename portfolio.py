@@ -38,13 +38,17 @@ def resolve_user_id(identifier: str) -> str:
 
 
 def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price: float):
-    if total_paid <= 0 or buy_price <= 0:
+    # Sanitize float inputs if passed as comma-separated strings
+    total_paid_val = float(str(total_paid).replace(",", "."))
+    buy_price_val = float(str(buy_price).replace(",", "."))
+
+    if total_paid_val <= 0 or buy_price_val <= 0:
         raise ValueError("Total paid and buy price must be positive numbers.")
 
     data.init_db()
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
-    shares = total_paid / buy_price
+    shares = total_paid_val / buy_price_val
 
     with closing(data._connect()) as conn:
         row = conn.execute(
@@ -55,7 +59,7 @@ def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price:
     if row:
         existing_shares, existing_buy_price = row
         new_shares = existing_shares + shares
-        total_cost = (existing_shares * existing_buy_price) + total_paid
+        total_cost = (existing_shares * existing_buy_price) + total_paid_val
         new_avg_price = total_cost / new_shares
         with closing(data._connect()) as conn, conn:
             conn.execute(
@@ -66,7 +70,7 @@ def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price:
         with closing(data._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO holdings (user_id, ticker, shares, buy_price) VALUES (?, ?, ?, ?)",
-                (user_id, ticker, shares, buy_price),
+                (user_id, ticker, shares, buy_price_val),
             )
 
 
@@ -74,6 +78,8 @@ def remove_holding(user_identifier: str, ticker: str, shares: float = None) -> b
     data.init_db()
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
+
+    shares_val = float(str(shares).replace(",", ".")) if shares is not None else None
 
     with closing(data._connect()) as conn:
         row = conn.execute(
@@ -86,14 +92,14 @@ def remove_holding(user_identifier: str, ticker: str, shares: float = None) -> b
 
     current_shares = row[0]
 
-    if shares is None or shares >= current_shares:
+    if shares_val is None or shares_val >= current_shares:
         with closing(data._connect()) as conn, conn:
             conn.execute(
                 "DELETE FROM holdings WHERE user_id = ? AND ticker = ?",
                 (user_id, ticker),
             )
     else:
-        new_shares = current_shares - shares
+        new_shares = current_shares - shares_val
         with closing(data._connect()) as conn, conn:
             conn.execute(
                 "UPDATE holdings SET shares = ? WHERE user_id = ? AND ticker = ?",

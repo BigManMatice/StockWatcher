@@ -1,39 +1,54 @@
-# API Ticker mapping for price fetching
-API_RENAMES = {
-    "MICROSOFT": "MSF.DE",
-    "MSFT": "MSF.DE",
-    "NVIDIA": "NVD.DE",
-    "NVDA": "NVD.DE",
+# stockName.py
+
+TICKER_MAP = {
+    # Stocks
     "AAPL": "APC.DE",
+    "MSFT": "MSF.DE",
+    "NVDA": "NVD.DE",
+    "TSLA": "TSLA",
+
+    # Core Index ETFs
     "S&P500": "CSPX.AS",
+    "FTSE": "VWCE.DE",
+    "VWCE": "VWCE.DE",
+    "FTSE ALL-WORLD": "VWCE.DE",
+
+    # Thematic & Regional ETFs
+    "RBOT": "2B76.DE",
+    "ROBOTICS": "2B76.DE",
+    "2B76": "2B76.DE",
+    "SMEA": "EUNK.DE",
+    "EUNK": "EUNK.DE",
+    "EUROPE": "EUNK.DE",
 }
 
-# Display mapping for Discord and CLI outputs
 DISPLAY_NAMES = {
     "AAPL": "AAPL (APC.DE)",
     "APC.DE": "AAPL (APC.DE)",
-    "APC.LS": "AAPL (APC.DE)",
-    "S&P500": "S&P500 (CSPX.AS)",
-    "CSPX": "S&P500 (CSPX.AS)",
-    "CSPX.AS": "S&P500 (CSPX.AS)",
-    "SXR8": "S&P500 (CSPX.AS)",
-    "SXR8.DE": "S&P500 (SXR8.DE)",
-    "SXR8.LS": "S&P500 (SXR8.DE)",
+    "MSFT": "MSFT (MSF.DE)",
+    "MSF.DE": "MSFT (MSF.DE)",
+    "NVDA": "NVDA (NVD.DE)",
+    "NVD.DE": "NVDA (NVD.DE)",
+    "VWCE.DE": "Vanguard FTSE All-World (VWCE.DE)",
+    "2B76.DE": "iShares Automation & Robotics (2B76.DE)",
+    "EUNK.DE": "iShares Core MSCI Europe (EUNK.DE)",
+    "CSPX.AS": "iShares S&P 500 (CSPX.AS)",
+    "TSLA": "TSLA",
 }
 
 
-def get_mapped_ticker(ticker: str) -> str:
-    cleaned = ticker.upper().strip()
-    return API_RENAMES.get(cleaned, cleaned)
+def get_mapped_ticker(user_input: str) -> str:
+    clean = user_input.strip().upper()
+    return TICKER_MAP.get(clean, clean)
 
 
 def get_display_name(ticker: str) -> str:
-    cleaned = ticker.upper().strip()
-    if cleaned in DISPLAY_NAMES:
-        return DISPLAY_NAMES[cleaned]
+    clean = ticker.strip().upper()
+    if clean in DISPLAY_NAMES:
+        return DISPLAY_NAMES[clean]
 
-    mapped = get_mapped_ticker(cleaned)
-    if mapped != cleaned:
-        return f"{cleaned} ({mapped})"
+    for orig, mapped in TICKER_MAP.items():
+        if mapped == clean:
+            return f"{orig} ({clean})"
 
-    return cleaned
+    return clean

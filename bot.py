@@ -28,23 +28,33 @@ SPIKE_THRESHOLD_PCT = 2.0
 last_prices = {}
 
 
+def _parse_float(val) -> float:
+    """Helper function to cleanly parse string/float numbers containing either commas or dots."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    return float(str(val).replace(",", ".").strip())
+
+
 @bot.command(name="setalert")
 @commands.has_permissions(administrator=True)
-async def set_alert_threshold(ctx, percentage: float):
+async def set_alert_threshold(ctx, percentage: str):
     global SPIKE_THRESHOLD_PCT
-    val = float(percentage)
-    if val <= 0:
-        await ctx.send("⚠️ Threshold percentage must be greater than 0.")
-        return
+    try:
+        val = _parse_float(percentage)
+        if val <= 0:
+            await ctx.send("⚠️ Threshold percentage must be greater than 0.")
+            return
 
-    SPIKE_THRESHOLD_PCT = val
-    embed = discord.Embed(
-        title="⚙️ Alert Threshold Updated",
-        description=f"Price spike alerts will now trigger on moves of **±{SPIKE_THRESHOLD_PCT}%** or higher.",
-        color=discord.Color.green(),
-        timestamp=discord.utils.utcnow(),
-    )
-    await ctx.send(embed=embed)
+        SPIKE_THRESHOLD_PCT = val
+        embed = discord.Embed(
+            title="⚙️ Alert Threshold Updated",
+            description=f"Price spike alerts will now trigger on moves of **±{SPIKE_THRESHOLD_PCT}%** or higher.",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow(),
+        )
+        await ctx.send(embed=embed)
+    except ValueError:
+        await ctx.send("⚠️ Please provide a valid number. Example: `!setalert 2.5` or `!setalert 2,5`")
 
 
 @set_alert_threshold.error
@@ -217,10 +227,10 @@ async def connect_account(ctx, username: str):
 
 
 @bot.command(name="add")
-async def add_cmd(ctx, ticker: str, total_paid: float, buy_price: float):
+async def add_cmd(ctx, ticker: str, total_paid: str, buy_price: str):
     try:
-        total_paid_num = float(total_paid)
-        buy_price_num = float(buy_price)
+        total_paid_num = _parse_float(total_paid)
+        buy_price_num = _parse_float(buy_price)
 
         user_id = portfolio.resolve_user_id(str(ctx.author.id))
         portfolio.add_holding(user_id, ticker, total_paid_num, buy_price_num)
@@ -237,15 +247,17 @@ async def add_cmd(ctx, ticker: str, total_paid: float, buy_price: float):
             color=discord.Color.green(),
         )
         await ctx.send(embed=embed)
+    except ValueError:
+        await ctx.send("⚠️ Invalid numerical values provided. Example: `!add AAPL 75 309,12` or `!add AAPL 75 309.12`")
     except Exception as e:
         await ctx.send(f"⚠️ Error: {e}")
 
 
 @bot.command(name="remove")
-async def remove_cmd(ctx, ticker: str, shares: float = None):
+async def remove_cmd(ctx, ticker: str, shares: str = None):
     try:
         user_id = portfolio.resolve_user_id(str(ctx.author.id))
-        shares_num = float(shares) if shares is not None else None
+        shares_num = _parse_float(shares) if shares is not None else None
         if portfolio.remove_holding(user_id, ticker, shares_num):
             removed_str = f"`{shares_num}` shares of" if shares_num is not None else "all shares of"
             await ctx.send(f"🗑️ Removed {removed_str} **{ticker.upper()}** from portfolio.")
@@ -457,3 +469,78 @@ async def execute_unified_command(user_id: str, command_line: str):
         print(f"⚠️ Command argument error: {e}")
     except Exception as e:
         print(f"❌ Execution Error: {e}")
+
+# Toevoegen onderaan bot.py
+
+import quant
+
+@bot.command(name="kelly")
+async def kelly_cmd(ctx, win_rate: str, win_loss_ratio: str):
+    """Berekent de optimale positiegrootte via het Kelly-criterium."""
+    try:
+        w_rate = _parse_float(win_rate)
+        wl_ratio = _parse_float(win_loss_ratio)
+
+        # Als win_rate als percentage is ingevoerd (bijv 55 in plaats van 0.55)
+        if w_rate > 1:
+            w_rate = w_rate / 100.0
+
+        fraction = quant.calculate_kelly_criterion(w_rate, wl_ratio)
+        pct = fraction * 100.0
+
+        embed = discord.Embed(
+            title="🎲 Kelly-criterium Berekening",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Invoerparameters",
+            value=f"• **Winstkans:** `{w_rate * 100:.1f}%`\n• **Winst/Verlies Verhouding:** `{wl_ratio:.2f}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Advies Positiegrootte",
+            value=f"• **Kelly Fraction:** `{fraction:.4f}`\n• **Aanbevolen inzet:** **`{pct:.2f}%`** van je totale vermogen",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+    except ValueError as e:
+        await ctx.send(f"⚠️ Invoerfout: {e}")
+    except Exception as e:
+        await ctx.send(f"❌ Fout bij berekening: {e}")
+
+
+@bot.command(name="montecarlo")
+async def montecarlo_cmd(ctx, capital: str, daily_return_pct: str, volatility_pct: str, days: int = 252):
+    """Voert een Monte Carlo-simulatie uit op portfolio-ontwikkeling."""
+    async with ctx.typing():
+        try:
+            start_cap = _parse_float(capital)
+            ret = _parse_float(daily_return_pct) / 100.0
+            vol = _parse_float(volatility_pct) / 100.0
+
+            res = quant.run_monte_carlo_simulation(start_cap, ret, vol, days=int(days))
+
+            embed = discord.Embed(
+                title=f"🎲 Monte Carlo Simulatie ({days} handelsdagen)",
+                description=f"Simulatie uitgevoerd over 1.000 willekeurige marktscenario's.",
+                color=discord.Color.purple(),
+            )
+            embed.add_field(
+                name="Startkapitaal",
+                value=f"€{start_cap:.2f}",
+                inline=False,
+            )
+            embed.add_field(
+                name="Verwacht Eindvermogen",
+                value=(
+                    f"• **Gemiddelde:** €`{res['mean_final']:.2f}`\n"
+                    f"• **Mediaan:** €`{res['median_final']:.2f}`\n"
+                    f"• **95% Betrouwbaarheidsinterval:** €`{res['percentile_5']:.2f}` tot €`{res['percentile_95']:.2f}`\n"
+                    f"• **Slechtste Scenario (Worst Case):** €`{res['worst_case']:.2f}`\n"
+                    f"• **Beste Scenario (Best Case):** €`{res['best_case']:.2f}`"
+                ),
+                inline=False,
+            )
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"❌ Fout bij het uitvoeren van Monte Carlo-simulatie: {e}")
