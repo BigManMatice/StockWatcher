@@ -5,24 +5,21 @@ import pandas as pd
 import requests
 import yfinance as yf
 import config
-
-# Import mapping function from stockName.py
 from stockName import get_mapped_ticker
 
 
 class DataError(Exception):
     """Custom exception for data fetching errors."""
-
     pass
 
 
 def _connect():
-    return sqlite3.connect("bot_database.db")
+    return sqlite3.connect(config.DB_PATH)
 
 
 def init_db():
+    """Unified single-point SQLite database initialization routine with automatic schema migration."""
     with closing(_connect()) as conn, conn:
-        # Create or update prices table to include full OHLCV metrics
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS prices (
@@ -35,11 +32,50 @@ def init_db():
                 volume REAL,
                 PRIMARY KEY (ticker, date)
             )
-        """
+            """
         )
+        
+        cursor = conn.execute("PRAGMA table_info(prices)")
+        existing_cols = [c[1] for c in cursor.fetchall()]
+        for col_name in ["open", "high", "low", "volume"]:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE prices ADD COLUMN {col_name} REAL")
 
-
-# --- FX RATES (USD -> EUR) ---
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fx (
+                pair TEXT PRIMARY KEY,
+                rate REAL NOT NULL,
+                fetched_on TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist (
+                ticker TEXT PRIMARY KEY
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS holdings (
+                user_id TEXT NOT NULL DEFAULT 'default_user',
+                ticker TEXT NOT NULL,
+                shares REAL NOT NULL,
+                buy_price REAL NOT NULL,
+                PRIMARY KEY (user_id, ticker)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_links (
+                custom_username TEXT PRIMARY KEY,
+                discord_id TEXT NOT NULL UNIQUE
+            )
+            """
+        )
 
 
 def get_usd_eur() -> float:
@@ -55,22 +91,20 @@ def get_usd_eur() -> float:
     if row and row[1] == today:
         return row[0]
 
-    # Primary: yfinance EUR/USD
     try:
         eurusd = yf.Ticker("EURUSD=X").fast_info["lastPrice"]
         usd_eur_rate = 1.0 / float(eurusd)
     except Exception:
-        # Fallback: FMP API
         try:
             url = f"https://financialmodelingprep.com/api/v3/quote/EURUSD?apikey={config.FMP_KEY}"
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()
-            data = resp.json()
-            usd_eur_rate = 1.0 / float(data[0]["price"])
+            data_json = resp.json()
+            usd_eur_rate = 1.0 / float(data_json[0]["price"])
         except Exception:
             if row:
                 return row[0]
-            usd_eur_rate = 0.89  # Default fallback rate
+            usd_eur_rate = 0.89
 
     with closing(_connect()) as conn, conn:
         conn.execute(
@@ -81,16 +115,14 @@ def get_usd_eur() -> float:
     return usd_eur_rate
 
 
-# --- QUOTE FETCHING PROVIDERS ---
-
-
 def _fetch_yfinance_quote(ticker: str) -> dict:
-    """Fetch live price directly via Yahoo Finance (native European ETF support)."""
-    stock = yf.Ticker(ticker)
-    info = stock.fast_info
-
-    price = float(info.get("lastPrice", 0) or 0)
-    prev_close = float(info.get("previousClose", price) or price)
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.fast_info
+        price = float(info.get("lastPrice", 0) or 0)
+        prev_close = float(info.get("previousClose", price) or price)
+    except Exception as e:
+        raise DataError(f"yfinance failed for ticker '{ticker}': {e}")
 
     if price == 0:
         raise DataError(f"yfinance returned zero price for '{ticker}'")
@@ -106,16 +138,18 @@ def _fetch_yfinance_quote(ticker: str) -> dict:
 
 
 def _fetch_fmp_quote(ticker: str) -> dict:
-    """Fetch current price from Financial Modeling Prep."""
-    url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={config.FMP_KEY}"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={config.FMP_KEY}"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data_json = resp.json()
+    except Exception as e:
+        raise DataError(f"FMP failed for ticker '{ticker}': {e}")
 
-    if not data or not isinstance(data, list):
+    if not data_json or not isinstance(data_json, list):
         raise DataError(f"No price data found on FMP for '{ticker}'")
 
-    item = data[0]
+    item = data_json[0]
     price = float(item.get("price", 0))
     prev_close = float(item.get("previousClose", price))
 
@@ -132,17 +166,11 @@ def _fetch_fmp_quote(ticker: str) -> dict:
     }
 
 
-# Inside data.py
-from stockName import get_mapped_ticker
-
 def get_finnhub_quote(ticker: str) -> dict:
-    """Fetches Euro quote via yfinance/APIs using mapped ticker, saving as original ticker."""
     original_ticker = ticker.upper().strip()
     api_ticker = get_mapped_ticker(original_ticker)
 
     quote_data = None
-
-    # European / Exchange-suffixed tickers query yfinance
     is_european = any(
         api_ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
     )
@@ -153,7 +181,6 @@ def get_finnhub_quote(ticker: str) -> dict:
         except Exception:
             pass
 
-    # Fallback to Finnhub / FMP if yfinance fails
     if not quote_data:
         try:
             quote_data = _fetch_fmp_quote(api_ticker)
@@ -163,12 +190,10 @@ def get_finnhub_quote(ticker: str) -> dict:
             except Exception as e:
                 raise DataError(f"Could not fetch quote for '{original_ticker}' ({api_ticker}): {e}")
 
-    # Set ticker key back to standard name (e.g., AAPL)
     quote_data["ticker"] = original_ticker
-
-    # Save snapshot into SQLite under standard name ('AAPL')
     today = date.today().isoformat()
     init_db()
+
     with closing(_connect()) as conn, conn:
         conn.execute(
             "INSERT OR REPLACE INTO prices (ticker, date, close) VALUES (?, ?, ?)",
@@ -179,12 +204,10 @@ def get_finnhub_quote(ticker: str) -> dict:
 
 
 def get_daily(ticker: str) -> pd.DataFrame:
-    """Return DataFrame from local SQLite history with full OHLCV columns, backfilling 1y history via yfinance if needed."""
     ticker = ticker.upper().strip()
     api_ticker = get_mapped_ticker(ticker)
     init_db()
 
-    # 1. Query local SQLite database
     with closing(_connect()) as conn:
         df = pd.read_sql_query(
             "SELECT date, open, high, low, close, volume FROM prices WHERE ticker = ? ORDER BY date",
@@ -194,29 +217,25 @@ def get_daily(ticker: str) -> pd.DataFrame:
             index_col="date",
         )
 
-    # 2. Backfill 1 year of daily history if database has fewer than 20 rows or missing high/low columns
     if len(df) < 20 or df["high"].isnull().all():
         try:
             stock = yf.Ticker(api_ticker)
             hist = stock.history(period="1y")
 
             if not hist.empty:
-                records = []
-                for dt, row in hist.iterrows():
-                    d_str = dt.strftime("%Y-%m-%d")
-                    records.append(
-                        (
-                            ticker,
-                            d_str,
-                            float(row.get("Open", row["Close"])),
-                            float(row.get("High", row["Close"])),
-                            float(row.get("Low", row["Close"])),
-                            float(row["Close"]),
-                            float(row.get("Volume", 0)),
-                        )
+                records = [
+                    (
+                        ticker,
+                        dt.strftime("%Y-%m-%d"),
+                        float(row.get("Open", row["Close"])),
+                        float(row.get("High", row["Close"])),
+                        float(row.get("Low", row["Close"])),
+                        float(row["Close"]),
+                        float(row.get("Volume", 0)),
                     )
+                    for dt, row in hist.iterrows()
+                ]
 
-                # Batch insert missing historical snapshots
                 with closing(_connect()) as conn, conn:
                     conn.executemany(
                         """
@@ -226,7 +245,6 @@ def get_daily(ticker: str) -> pd.DataFrame:
                         records,
                     )
 
-                # Re-query SQLite to get the updated history
                 with closing(_connect()) as conn:
                     df = pd.read_sql_query(
                         "SELECT date, open, high, low, close, volume FROM prices WHERE ticker = ? ORDER BY date",
@@ -241,10 +259,8 @@ def get_daily(ticker: str) -> pd.DataFrame:
     if df.empty:
         raise DataError(f"No price history found in database for '{ticker}'.")
 
-    # 3. Convert USD to EUR if this is a standard US ticker (no European suffix)
     is_european = any(
-        api_ticker.endswith(ext)
-        for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
+        api_ticker.endswith(ext) for ext in [".DE", ".LS", ".AS", ".L", ".PA", ".MI"]
     )
 
     if not is_european:

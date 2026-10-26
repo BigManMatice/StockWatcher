@@ -1,9 +1,9 @@
 import logging
 from logging.handlers import RotatingFileHandler
+import warnings
 
 import config
 from bot import bot
-import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*inplace keyword.*")
@@ -17,4 +17,5 @@ logging.basicConfig(
     handlers=[handler, logging.StreamHandler()],
 )
 
-bot.run(config.DISCORD_TOKEN, log_handler=None)
+if __name__ == "__main__":
+    bot.run(config.DISCORD_TOKEN, log_handler=None)

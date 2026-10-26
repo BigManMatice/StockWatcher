@@ -2,81 +2,24 @@ from contextlib import closing
 import data
 
 
-def init_portfolio_db():
-    with closing(data._connect()) as conn, conn:
-        # Check if the existing holdings table has ticker as a single primary key
-        cursor = conn.execute("PRAGMA table_info(holdings)")
-        cols = cursor.fetchall()
+def resolve_user_id(identifier: str) -> str:
+    data.init_db()
+    identifier_clean = str(identifier).strip().lower()
 
-        # If table exists, check if 'ticker' is the sole primary key
-        # pk > 0 indicates a primary key column
-        pk_cols = [c[1] for c in cols if c[5] > 0]
+    with closing(data._connect()) as conn:
+        row = conn.execute(
+            "SELECT discord_id FROM account_links WHERE custom_username = ?",
+            (identifier_clean,),
+        ).fetchone()
+        return row[0] if row else identifier_clean
 
-        if pk_cols == ["ticker"]:
-            # Migrate table to composite primary key (user_id, ticker)
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS holdings_new (
-                    user_id TEXT NOT NULL DEFAULT 'default_user',
-                    ticker TEXT NOT NULL,
-                    shares REAL NOT NULL,
-                    buy_price REAL NOT NULL,
-                    PRIMARY KEY (user_id, ticker)
-                )
-            """
-            )
-
-            # Copy over existing data
-            cursor = conn.execute("PRAGMA table_info(holdings)")
-            existing_col_names = [c[1] for c in cursor.fetchall()]
-
-            if "user_id" in existing_col_names:
-                conn.execute(
-                    """
-                    INSERT INTO holdings_new (user_id, ticker, shares, buy_price)
-                    SELECT user_id, ticker, shares, buy_price FROM holdings
-                """
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO holdings_new (user_id, ticker, shares, buy_price)
-                    SELECT 'default_user', ticker, shares, buy_price FROM holdings
-                """
-                )
-
-            # Drop old table and rename new table
-            conn.execute("DROP TABLE holdings")
-            conn.execute("ALTER TABLE holdings_new RENAME TO holdings")
-
-        else:
-            # Create standard composite table if it doesn't exist
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS holdings (
-                    user_id TEXT NOT NULL DEFAULT 'default_user',
-                    ticker TEXT NOT NULL,
-                    shares REAL NOT NULL,
-                    buy_price REAL NOT NULL,
-                    PRIMARY KEY (user_id, ticker)
-                )"""
-            )
-
-        # Create account_links table for Discord ID mapping
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS account_links (
-                custom_username TEXT PRIMARY KEY,
-                discord_id TEXT NOT NULL UNIQUE
-            )"""
-        )
 
 def link_discord_account(discord_id: str, custom_username: str):
-    """Link a Discord user ID to a custom username."""
-    init_portfolio_db()
+    data.init_db()
     username = custom_username.strip().lower()
     discord_id = str(discord_id)
 
     with closing(data._connect()) as conn, conn:
-        # Store or update the user mapping
         conn.execute(
             """INSERT INTO account_links (custom_username, discord_id) 
                VALUES (?, ?) 
@@ -85,26 +28,7 @@ def link_discord_account(discord_id: str, custom_username: str):
         )
 
 
-def resolve_user_id(identifier: str) -> str:
-    """Resolve a custom username or Discord ID to the canonical account key."""
-    init_portfolio_db()
-    identifier_clean = str(identifier).strip().lower()
-
-    with closing(data._connect()) as conn:
-        # Check if identifier is a custom username link
-        row = conn.execute(
-            "SELECT discord_id FROM account_links WHERE custom_username = ?",
-            (identifier_clean,),
-        ).fetchone()
-
-        if row:
-            return row[0]
-
-    return identifier_clean
-
-
 def add_holding(user_identifier, ticker, total_paid, buy_price):
-    """Add position mapped to resolved account identifier."""
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
     total_paid = float(total_paid)
@@ -114,7 +38,7 @@ def add_holding(user_identifier, ticker, total_paid, buy_price):
         raise ValueError("Total paid and buy price must be positive.")
 
     shares = total_paid / buy_price
-    init_portfolio_db()
+    data.init_db()
 
     with closing(data._connect()) as conn, conn:
         row = conn.execute(
@@ -138,10 +62,9 @@ def add_holding(user_identifier, ticker, total_paid, buy_price):
 
 
 def remove_holding(user_identifier, ticker, shares=None):
-    """Remove position mapped to resolved account identifier."""
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
-    init_portfolio_db()
+    data.init_db()
 
     with closing(data._connect()) as conn, conn:
         row = conn.execute(
@@ -166,9 +89,8 @@ def remove_holding(user_identifier, ticker, shares=None):
 
 
 def get_portfolio(user_identifier):
-    """Fetch portfolio holdings mapped to resolved account identifier."""
     user_id = resolve_user_id(user_identifier)
-    init_portfolio_db()
+    data.init_db()
 
     with closing(data._connect()) as conn:
         rows = conn.execute(
