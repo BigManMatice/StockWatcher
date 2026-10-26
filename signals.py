@@ -19,6 +19,37 @@ def calculate_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return out.where(~((avg_loss == 0) & (avg_gain == 0)), 50.0)
 
 
+def calculate_ema(close: pd.Series, period: int = 20) -> float:
+    """Berekent de Exponential Moving Average (EMA)."""
+    ema_series = close.ewm(span=period, adjust=False).mean()
+    return float(ema_series.iloc[-1])
+
+
+def calculate_stoch_rsi(close: pd.Series, rsi_period: int = 14, stoch_period: int = 14, k_period: int = 3, d_period: int = 3) -> dict:
+    """Berekent de Stochastic RSI (%K en %D)."""
+    rsi = calculate_rsi(close, period=rsi_period)
+    min_rsi = rsi.rolling(window=stoch_period).min()
+    max_rsi = rsi.rolling(window=stoch_period).max()
+
+    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi)
+    stoch_rsi = stoch_rsi.fillna(0.5)
+
+    k = stoch_rsi.rolling(window=k_period).mean() * 100
+    d = k.rolling(window=d_period).mean()
+
+    k_val = float(k.iloc[-1])
+    d_val = float(d.iloc[-1])
+
+    if k_val < 20:
+        status = "oversold"
+    elif k_val > 80:
+        status = "overbought"
+    else:
+        status = "neutral"
+
+    return {"k": k_val, "d": d_val, "status": status}
+
+
 def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
     exp1 = close.ewm(span=fast, adjust=False).mean()
     exp2 = close.ewm(span=slow, adjust=False).mean()
@@ -27,11 +58,7 @@ def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int
     histogram = macd_line - signal_line
 
     is_bullish = bool(histogram.iloc[-1] > 0)
-    match is_bullish:
-        case True:
-            cross_type = "bullish"
-        case False:
-            cross_type = "bearish"
+    cross_type = "bullish" if is_bullish else "bearish"
 
     return {
         "macd_line": float(macd_line.iloc[-1]),
@@ -81,13 +108,12 @@ def calculate_stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3
 
     k_val = float(k.iloc[-1])
 
-    match k_val:
-        case k_val if k_val < 20:
-            status = "oversold"
-        case k_val if k_val > 80:
-            status = "overbought"
-        case _:
-            status = "neutral"
+    if k_val < 20:
+        status = "oversold"
+    elif k_val > 80:
+        status = "overbought"
+    else:
+        status = "neutral"
 
     return {
         "k": k_val,
@@ -102,11 +128,7 @@ def calculate_obv(df: pd.DataFrame) -> dict:
     obv = (direction * volume).fillna(0).cumsum()
 
     is_rising = bool(obv.iloc[-1] > obv.iloc[-5])
-    match is_rising:
-        case True:
-            trend = "rising"
-        case False:
-            trend = "falling"
+    trend = "rising" if is_rising else "falling"
 
     return {
         "obv": float(obv.iloc[-1]),
@@ -130,9 +152,7 @@ def calculate_pivot_points(df: pd.DataFrame) -> dict:
 
 
 def detect_early_warnings(df: pd.DataFrame, current_price: float) -> list:
-    """Detecteert patronen die wijzen op een aanstaande koersuitbraak (vóór het gebeurt)."""
     warnings = []
-
     if len(df) < 14:
         return warnings
 
@@ -140,11 +160,10 @@ def detect_early_warnings(df: pd.DataFrame, current_price: float) -> list:
     high = df["high"] if "high" in df.columns else close
     low = df["low"] if "low" in df.columns else close
 
-    # Dynamic rolling windows for variable dataframe lengths (e.g., unit test data)
     window_bb = min(20, len(df))
     window_quantile = min(50, len(df))
 
-    # 1. Bollinger Band Squeeze (Volatiliteit droogt op -> grote beweging op komst)
+    # 1. Bollinger Band Squeeze
     ma = close.rolling(window_bb).mean()
     std = close.rolling(window_bb).std()
     upper_band = ma + (std * 2)
@@ -214,6 +233,8 @@ def analyze_ticker(ticker: str) -> dict:
                 "signal": "NEUTRAL ⚖️ | Insufficient data",
                 "verdict": "NEUTRAL ⚖️",
                 "rsi": 50.0,
+                "ema20": price,
+                "stoch_rsi": {"k": 50.0, "status": "neutral"},
                 "macd": {"cross": "neutral", "histogram": 0.0},
                 "bollinger": {"lower": price, "upper": price},
                 "atr": 0.0,
@@ -225,6 +246,8 @@ def analyze_ticker(ticker: str) -> dict:
         close = df["close"]
         rsi_series = calculate_rsi(close)
         current_rsi = float(rsi_series.iloc[-1])
+        ema20 = calculate_ema(close, period=20)
+        stoch_rsi = calculate_stoch_rsi(close)
         macd = calculate_macd(close)
         bb = calculate_bollinger_bands(close)
         atr = calculate_atr(df)
@@ -238,66 +261,53 @@ def analyze_ticker(ticker: str) -> dict:
         bullish_signals = 0
         bearish_signals = 0
 
-        # 1. SMA Trend
-        is_above_sma = bool(price > fast_sma)
-        match is_above_sma:
-            case True:
-                bullish_signals += 1
-                reasons.append(f"Price > SMA20 (€{fast_sma:.2f})")
-            case False:
-                bearish_signals += 1
-                reasons.append(f"Price < SMA20 (€{fast_sma:.2f})")
+        # 1. EMA 20 Trend
+        if price > ema20:
+            bullish_signals += 1
+            reasons.append(f"Price > EMA20 (€{ema20:.2f})")
+        else:
+            bearish_signals += 1
+            reasons.append(f"Price < EMA20 (€{ema20:.2f})")
 
         # 2. RSI Condition
-        match current_rsi:
-            case current_rsi if current_rsi < 30:
-                bullish_signals += 2
-                reasons.append(f"RSI Oversold ({current_rsi:.1f})")
-            case current_rsi if current_rsi > 70:
-                bearish_signals += 2
-                reasons.append(f"RSI Overbought ({current_rsi:.1f})")
-            case _:
-                pass
+        if current_rsi < 30:
+            bullish_signals += 2
+            reasons.append(f"RSI Oversold ({current_rsi:.1f})")
+        elif current_rsi > 70:
+            bearish_signals += 2
+            reasons.append(f"RSI Overbought ({current_rsi:.1f})")
 
-        # 3. MACD Cross
-        match macd["cross"]:
-            case "bullish":
-                bullish_signals += 1
-                reasons.append("MACD Bullish Cross")
-            case "bearish":
-                bearish_signals += 1
-                reasons.append("MACD Bearish Cross")
+        # 3. Stochastic RSI Condition
+        if stoch_rsi["status"] == "oversold":
+            bullish_signals += 1
+            reasons.append(f"Stoch RSI Oversold (%K: {stoch_rsi['k']:.1f})")
+        elif stoch_rsi["status"] == "overbought":
+            bearish_signals += 1
+            reasons.append(f"Stoch RSI Overbought (%K: {stoch_rsi['k']:.1f})")
 
-        # 4. Bollinger Bands
-        match price:
-            case p if p <= bb["lower"]:
-                bullish_signals += 1
-                reasons.append("Price at Lower Bollinger Band")
-            case p if p >= bb["upper"]:
-                bearish_signals += 1
-                reasons.append("Price at Upper Bollinger Band")
-            case _:
-                pass
+        # 4. MACD Cross
+        if macd["cross"] == "bullish":
+            bullish_signals += 1
+            reasons.append("MACD Bullish Cross")
+        elif macd["cross"] == "bearish":
+            bearish_signals += 1
+            reasons.append("MACD Bearish Cross")
 
-        # 5. Stochastic Status
-        match stoch["status"]:
-            case "oversold":
-                bullish_signals += 1
-                reasons.append(f"Stochastic Oversold (%K: {stoch['k']:.1f})")
-            case "overbought":
-                bearish_signals += 1
-                reasons.append(f"Stochastic Overbought (%K: {stoch['k']:.1f})")
-            case _:
-                pass
+        # 5. Bollinger Bands
+        if price <= bb["lower"]:
+            bullish_signals += 1
+            reasons.append("Price at Lower Bollinger Band")
+        elif price >= bb["upper"]:
+            bearish_signals += 1
+            reasons.append("Price at Upper Bollinger Band")
 
         # Verdict Calculation
-        match (bullish_signals > bearish_signals + 1, bearish_signals > bullish_signals + 1):
-            case (True, _):
-                verdict = "BULLISH 🚀"
-            case (_, True):
-                verdict = "BEARISH 💥"
-            case _:
-                verdict = "NEUTRAL ⚖️"
+        if bullish_signals > bearish_signals + 1:
+            verdict = "BULLISH 🚀"
+        elif bearish_signals > bullish_signals + 1:
+            verdict = "BEARISH 💥"
+        else:
+            verdict = "NEUTRAL ⚖️"
 
         signal_text = f"{verdict} | " + " | ".join(reasons[:3])
 
@@ -309,6 +319,8 @@ def analyze_ticker(ticker: str) -> dict:
             "signal": signal_text,
             "verdict": verdict,
             "rsi": current_rsi,
+            "ema20": ema20,
+            "stoch_rsi": stoch_rsi,
             "macd": macd,
             "bollinger": bb,
             "atr": atr,
@@ -322,8 +334,8 @@ def analyze_ticker(ticker: str) -> dict:
         raise RuntimeError(f"Error processing {ticker}: {e}")
 
 
-def analyze_ticker_advanced(ticker: str) -> dict:
-    """Uitgebreide analyse inclusief Kelly sizing en Early Warning alerts."""
+
+def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 298.00) -> dict:
     api_ticker = get_mapped_ticker(ticker)
     df = data.get_daily(api_ticker)
     quote = data.get_finnhub_quote(api_ticker)
@@ -331,11 +343,20 @@ def analyze_ticker_advanced(ticker: str) -> dict:
 
     early_warnings = detect_early_warnings(df, price)
 
-    # Standard quantitative expectation parameters
+    # Bepaal Advies Action: KOOP (BUY 🟢) of VERKOOP (SELL 🔴)
+    action = "HOLD ⚖️"
+    if any("Pre-Buy" in w or "Testing Resistance" in w or "Bollinger Squeeze" in w for w in early_warnings):
+        action = "BUY 🟢 (Koopsignaal / Bodem inzicht)"
+    elif any("Pre-Sell" in w or "Testing Support" in w for w in early_warnings):
+        action = "SELL 🔴 (Verkoopsignaal / Top inzicht)"
+
+    # Kelly Sizing op basis van werkelijk portfolio-kapitaal
     win_rate = 0.55
     win_loss_ratio = 1.5
-
-    kelly_pct = quant.calculate_kelly_criterion(win_rate, win_loss_ratio) * 100.0
+    kelly_fraction = quant.calculate_kelly_criterion(win_rate, win_loss_ratio)
+    kelly_pct = kelly_fraction * 100.0
+    kelly_eur = portfolio_total_value * kelly_fraction
+    kelly_shares = (kelly_eur / price) if price > 0 else 0.0
 
     return {
         "ticker": ticker,
@@ -343,5 +364,8 @@ def analyze_ticker_advanced(ticker: str) -> dict:
         "price": price,
         "pct_change": float(quote.get("pct_change", 0.0)),
         "early_warnings": early_warnings,
+        "action": action,
         "kelly_pct": kelly_pct,
+        "kelly_eur": kelly_eur,
+        "kelly_shares": kelly_shares,
     }

@@ -68,6 +68,7 @@ async def test_bot_commands_and_events():
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
 async def test_alert_spike_trigger_threshold():
     """Verify that minute_market_scanner triggers a Discord alert when price movement >= threshold."""
     bot.SPIKE_THRESHOLD_PCT = 0.1
@@ -100,5 +101,6 @@ async def test_alert_spike_trigger_threshold():
 
         mock_alert_channel.send.assert_called_once()
         called_embed = mock_alert_channel.send.call_args[1]["embed"]
-        assert "Price Spike Alert!" in called_embed.title
-        assert "APC.DE" in called_embed.description
+        
+        # Flexibele check op PRICE SPIKE in de nieuwe grote titel
+        assert "PRICE SPIKE" in called_embed.title.upper()

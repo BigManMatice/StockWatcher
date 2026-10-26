@@ -1,6 +1,6 @@
 # bot.py
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 import discord
 from discord.ext import commands, tasks
@@ -9,11 +9,16 @@ import alerts
 import config
 import data
 import portfolio
+import quant
 import signals
 from stockName import get_display_name
 
+# Cooldown tracking: { ticker: { "last_sent": datetime, "last_price": float, "muted_until": datetime } }
+alert_tracker = {}
+
 intents = discord.Intents.default()
 intents.message_content = True
+intents.reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 LOG_CHANNEL_ID = getattr(config, "LOG_CHANNEL_ID", None)
@@ -35,6 +40,36 @@ def _parse_float(val) -> float:
     return float(str(val).replace(",", ".").strip())
 
 
+@bot.event
+async def on_raw_reaction_add(payload):
+    """Pauzeert meldingen voor een specifiek aandeel gedurende 3 uur als een gebruiker reageert op het bericht."""
+    if payload.user_id == bot.user.id:
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if not channel:
+        return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+        if message.author.id == bot.user.id and message.embeds:
+            embed = message.embeds[0]
+            embed_text = (embed.title or "") + " " + (embed.description or "")
+            
+            for ticker in alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]:
+                display_name = get_display_name(ticker)
+                if ticker in embed_text or display_name in embed_text:
+                    now = datetime.utcnow()
+                    if ticker not in alert_tracker:
+                        alert_tracker[ticker] = {"last_sent": datetime.min, "last_price": 0.0, "muted_until": datetime.min}
+                    
+                    alert_tracker[ticker]["muted_until"] = now + timedelta(hours=3)
+                    await channel.send(f"🔕 Alert voor **{display_name}** is gepauzeerd voor **3 uur** (reactie-stop actief).")
+                    break
+    except Exception as e:
+        print(f"[Reaction Handler Error]: {e}")
+
+
 @bot.command(name="setalert")
 @commands.has_permissions(administrator=True)
 async def set_alert_threshold(ctx, percentage: str):
@@ -54,7 +89,7 @@ async def set_alert_threshold(ctx, percentage: str):
         )
         await ctx.send(embed=embed)
     except ValueError:
-        await ctx.send("⚠️ Please provide a valid number. Example: `!setalert 2.5` or `!setalert 2,5`")
+        await ctx.send("⚠️ Please provide a valid number. Example: `!setalert 2.5` or `!setalert 2,5` storm")
 
 
 @set_alert_threshold.error
@@ -75,8 +110,6 @@ async def view_alert_threshold(ctx):
     await ctx.send(embed=embed)
 
 
-# bot.py (Updated minute_market_scanner loop)
-
 @tasks.loop(minutes=1)
 async def minute_market_scanner():
     try:
@@ -94,55 +127,122 @@ async def minute_market_scanner():
             except Exception as e:
                 print(f"[Alert Warning] Could not find alert channel: {e}")
 
+        target_send_channel = alert_channel or log_channel
         watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
+        now = datetime.utcnow()
+
+        # Bereken huidige totale portfolio waarde voor dynamische Kelly sizing
+        holdings = portfolio.get_portfolio("default_user")
+        tot_portfolio_val = sum(h.get("value", h["shares"] * h["buy_price"]) for h in holdings) if holdings else 298.00
 
         for ticker in watchlist_items:
             display_name = get_display_name(ticker)
             try:
                 quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
                 price = quote["price"]
-                pct = quote["pct_change"]
 
-                # Check price spike threshold against last known price
+                # 1. Price Spike Alert Check
                 if ticker in last_prices:
                     prev_price = last_prices[ticker]
                     spike_pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
 
                     if abs(spike_pct) >= SPIKE_THRESHOLD_PCT:
+                        diff_tag = "+" if spike_pct > 0 else "-"
                         alert_icon = "🚀" if spike_pct > 0 else "💥"
-                        alert_msg = (
-                            f"{alert_icon} **Price Spike Alert!**\n"
-                            f"**{display_name}** moved **{spike_pct:+.2f}%**!\n"
-                            f"• Prev: €{prev_price:.2f} ➔ Curr: €{price:.2f}"
-                        )
-                        alert_embed = discord.Embed(
-                            title=f"{alert_icon} Price Spike Alert! (Threshold: ±{SPIKE_THRESHOLD_PCT}%)",
-                            description=alert_msg,
-                            color=discord.Color.gold() if spike_pct > 0 else discord.Color.dark_red(),
+
+                        spike_embed = discord.Embed(
+                            title=f"{alert_icon} PRICE SPIKE DETECTED",
+                            description=(
+                                f"## {display_name}\n"
+                                f"De koers stijgt/daalt krachtig buiten de ingestelde drempelwaarde!\n\n"
+                                f"```diff\n"
+                                f"{diff_tag} Verandering: {spike_pct:+.2f}%\n"
+                                f"{diff_tag} Oude Koers:  € {prev_price:.2f}\n"
+                                f"{diff_tag} Nieuwe Koers: € {price:.2f}\n"
+                                f"```"
+                            ),
+                            color=discord.Color.green() if spike_pct > 0 else discord.Color.red(),
                             timestamp=discord.utils.utcnow(),
                         )
-                        target = alert_channel or log_channel
-                        if target:
-                            await target.send(embed=alert_embed)
+                        spike_embed.add_field(
+                            name="📊 Markt Details",
+                            value=f"• **Drempelwaarde:** `±{SPIKE_THRESHOLD_PCT}%`\n• **Status:** Actieve markt-uitbraak",
+                            inline=False,
+                        )
+                        spike_embed.set_footer(text="StockWatcher Real-Time Scanner • Trading Alert")
+
+                        if target_send_channel:
+                            await target_send_channel.send(embed=spike_embed)
 
                 last_prices[ticker] = price
 
-                # Run advanced early warning scan
-                res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker)
-                if res.get("early_warnings"):
-                    target = alert_channel or log_channel
-                    embed = discord.Embed(
-                        title=f"🚨 Early Warning Signal: {res['display_name']}",
-                        description=f"Koers: **€{res['price']:.2f}** ({res['pct_change']:+.2f}%)\n\n" + "\n".join(res["early_warnings"]),
-                        color=discord.Color.gold(),
-                        timestamp=discord.utils.utcnow(),
-                    )
-                    embed.add_field(
-                        name="🎲 Quant Risk Advies (Kelly)",
-                        value=f"Advies positiegrootte: **`{res['kelly_pct']:.2f}%`** van je vermogen.",
-                        inline=False,
-                    )
-                    await target.send(embed=embed)
+                # 2. Quant Early Warning Scan
+                res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker, tot_portfolio_val)
+                warnings = res.get("early_warnings", [])
+
+                if warnings:
+                    # Log iedere minuut naar de console/terminal
+                    print(f"[SCAN LOG {now.strftime('%H:%M:%S')}] {ticker}: {res.get('action', 'HOLD')} | {warnings[0]}")
+
+                    tracker = alert_tracker.get(ticker, {
+                        "last_sent": datetime.min,
+                        "last_price": price,
+                        "muted_until": datetime.min
+                    })
+
+                    time_since_last = now - tracker["last_sent"]
+                    is_muted = now < tracker["muted_until"]
+                    price_diff_pct = abs((price - tracker["last_price"]) / tracker["last_price"] * 100) if tracker["last_price"] > 0 else 0.0
+
+                    # Stuur Discord alert als:
+                    # - 20 minuten voorbij zijn en NIET muted, OF
+                    # - Koers nog meer beweegt (>= 1.0% breakout verschil)
+                    should_send_alert = (time_since_last >= timedelta(minutes=20) and not is_muted) or (price_diff_pct >= 1.0)
+
+                    if should_send_alert:
+                        action_text = res.get("action", "HOLD ⚖️")
+                        embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
+
+                        warning_embed = discord.Embed(
+                            title=f"🚨 QUANT EARLY WARNING ALERT",
+                            description=(
+                                f"## {res['display_name']}\n"
+                                f"Marktpatroon gedetecteerd **vóór** de daadwerkelijke koersuitbraak!\n\n"
+                                f"### ⚠️ Signaal Analyse\n"
+                                + "\n".join([f"• {w}" for w in warnings]) + "\n\n"
+                                f"• **Huidige Koers:** `€ {res['price']:.2f}` (`{res['pct_change']:+.2f}%`)"
+                            ),
+                            color=embed_color,
+                            timestamp=discord.utils.utcnow(),
+                        )
+                        warning_embed.add_field(
+                            name="🎲 Kelly-Criterium (Werkelijk Portfolio Advies)",
+                            value=(
+                                f"```yaml\n"
+                                f"Portfoliowaarde:     € {tot_portfolio_val:.2f}\n"
+                                f"Aanbevolen Inzet:    {res['kelly_pct']:.2f}% van vermogen\n"
+                                f"Max Bedrag:          € {res.get('kelly_eur', 0.0):.2f}\n"
+                                f"Aantal Aandelen:     {res.get('kelly_shares', 0.0):.4f} stuks\n"
+                                f"```"
+                            ),
+                            inline=False,
+                        )
+                        warning_embed.add_field(
+                            name="🎯 ACTIE ADVIES",
+                            value=f"### **{action_text}**",
+                            inline=False,
+                        )
+                        warning_embed.set_footer(text="Reageer met een emoji op dit bericht om alerts voor 3 uur te pauzeren • StockWatcher Engine")
+
+                        if target_send_channel:
+                            await target_send_channel.send(embed=warning_embed)
+
+                        # Update tracker state
+                        alert_tracker[ticker] = {
+                            "last_sent": now,
+                            "last_price": price,
+                            "muted_until": tracker["muted_until"] if not (price_diff_pct >= 1.0) else datetime.min,
+                        }
 
             except Exception as e:
                 print(f"[Scanner Error] {ticker}: {e}")
@@ -168,45 +268,51 @@ async def on_ready():
 @bot.command(name="help")
 async def help_cmd(ctx):
     embed = discord.Embed(
-        title="📈 StockWatcher Commands",
+        title="📈 STOCKWATCHER COMMANDS",
+        description="## Geünformeerd Handelsplatform & Risicobeheer",
         color=discord.Color.green(),
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(
-        name="Portfolio & Account",
+        name="💼 Portfolio & Account",
         value=(
-            "`!connect <username>` — Link Discord ID to custom CLI username\n"
-            "`!add <ticker> <total_paid> <buy_price>` — Add position\n"
-            "`!remove <ticker> [shares]` — Remove whole or partial position\n"
-            "`!portfolio` — Show total value and P/L in €"
+            "`!connect <username>` — Link Discord ID met custom CLI username\n"
+            "`!add <ticker> <total_paid> <buy_price>` — Voeg positie toe\n"
+            "`!remove <ticker> [shares]` — Verwijder (gedeeltelijke) positie\n"
+            "`!portfolio` — Toon totale waarde en P/L in €"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Watchlist & Scanning",
+        name="🔍 Watchlist & Scanning",
         value=(
-            "`!watch <ticker>` — Add ticker to scanner\n"
-            "`!unwatch <ticker>` — Remove ticker from scanner\n"
-            "`!watchlist` — Show monitored tickers\n"
-            "`!scan` — Run signal scan manually across watchlist"
+            "`!watch <ticker>` — Voeg ticker toe aan scanner\n"
+            "`!unwatch <ticker>` — Verwijder ticker uit scanner\n"
+            "`!watchlist` — Bekijk gemonitorde tickers\n"
+            "`!scan` — Voer handmatige signaalscan uit over watchlist"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Signals & Analysis",
-        value="`!check <ticker>` — Show live price & indicators for a ticker",
-        inline=False,
-    )
-    embed.add_field(
-        name="Alert Configuration",
+        name="📊 Signalen & Quant Analyse",
         value=(
-            "`!threshold` — View current spike alert percentage\n"
-            "`!setalert <percent>` — Set spike alert sensitivity"
+            "`!check <ticker>` — Toon live koers & indicatoren\n"
+            "`!kelly <win_rate> <win_loss_ratio>` — Bereken optimale positiegrootte\n"
+            "`!montecarlo <kapitaal> <dag_rendement%> <volatiliteit%> [dagen]` — Voer portfolio simulatie uit"
         ),
         inline=False,
     )
-    embed.add_field(name="Other", value="`!ping` — Check bot latency", inline=False)
-    embed.set_footer(text="Signals are prompts to look closer, not financial advice. • All prices in EUR")
+    embed.add_field(
+        name="⚙️ Alert Instellingen",
+        value=(
+            "`!threshold` — Bekijk huidige prijs-spike drempelwaarde\n"
+            "`!setalert <percent>` — Stel drempelwaarde in\n"
+            "`!testalert` — Stuur een test-alert naar het kanaal"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="🌐 Overig", value="`!ping` — Controleer bot vertraging", inline=False)
+    embed.set_footer(text="Signalen zijn geen financieel advies. • Alle prijzen in EUR")
     await ctx.send(embed=embed)
 
 
@@ -220,8 +326,8 @@ async def connect_account(ctx, username: str):
     clean_username = username.strip().lower()
     portfolio.link_discord_account(str(ctx.author.id), clean_username)
     embed = discord.Embed(
-        title="🔗 Account Connected",
-        description=f"Successfully linked **{ctx.author.name}** to CLI username **`{clean_username}`**!",
+        title="🔗 ACCOUNT CONNECTED",
+        description=f"## Gebruiker Gekoppeld\nSuccesvol **{ctx.author.name}** gelinkt aan CLI username **`{clean_username}`**!",
         color=discord.Color.green(),
     )
     await ctx.send(embed=embed)
@@ -238,20 +344,22 @@ async def add_cmd(ctx, ticker: str, total_paid: str, buy_price: str):
         shares = total_paid_num / buy_price_num
 
         embed = discord.Embed(
-            title="✅ Position Added",
+            title="✅ POSITIE TOEGEVOEGD",
             description=(
-                f"Added **{ticker.upper()}** to portfolio!\n"
-                f"• Total Paid: €`{total_paid_num:.2f}`\n"
-                f"• Buy Price: €`{buy_price_num:.2f}` / share\n"
-                f"• Shares Acquired: `{shares:.4f}`"
+                f"## {ticker.upper()}\n"
+                f"```diff\n"
+                f"+ Totaal Ingelegd: € {total_paid_num:.2f}\n"
+                f"+ Aankoopkoers:    € {buy_price_num:.2f} / aandeel\n"
+                f"+ Aantal Aandelen: {shares:.4f} stuks\n"
+                f"```"
             ),
             color=discord.Color.green(),
         )
         await ctx.send(embed=embed)
     except ValueError:
-        await ctx.send("⚠️ Invalid numerical values provided. Example: `!add AAPL 75 309,12` or `!add AAPL 75 309.12`")
+        await ctx.send("⚠️ Ongeldige getallen ingevoerd. Voorbeeld: `!add AAPL 75 309,12` of `!add AAPL 75 309.12`")
     except Exception as e:
-        await ctx.send(f"⚠️ Error: {e}")
+        await ctx.send(f"⚠️ Fout bij toevoegen: {e}")
 
 
 @bot.command(name="remove")
@@ -260,12 +368,12 @@ async def remove_cmd(ctx, ticker: str, shares: str = None):
         user_id = portfolio.resolve_user_id(str(ctx.author.id))
         shares_num = _parse_float(shares) if shares is not None else None
         if portfolio.remove_holding(user_id, ticker, shares_num):
-            removed_str = f"`{shares_num}` shares of" if shares_num is not None else "all shares of"
-            await ctx.send(f"🗑️ Removed {removed_str} **{ticker.upper()}** from portfolio.")
+            removed_str = f"`{shares_num}` aandelen van" if shares_num is not None else "alle aandelen van"
+            await ctx.send(f"🗑️ Succesvol {removed_str} **{ticker.upper()}** verwijderd uit portfolio.")
         else:
-            await ctx.send(f"⚠️ No open position for **{ticker.upper()}** found.")
+            await ctx.send(f"⚠️ Geen openstaande positie voor **{ticker.upper()}** gevonden.")
     except Exception as e:
-        await ctx.send(f"❌ Failed to remove position: {e}")
+        await ctx.send(f"❌ Fout bij verwijderen positie: {e}")
 
 
 @bot.command(name="portfolio")
@@ -273,12 +381,13 @@ async def show_portfolio(ctx):
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     holdings = portfolio.get_portfolio(user_id)
     if not holdings:
-        await ctx.send("💼 Portfolio is currently empty. Use `!add` to track positions.")
+        await ctx.send("💼 Portfolio is momenteel leeg. Gebruik `!add` om posities toe te voegen.")
         return
 
     embed = discord.Embed(
-        title="📊 Portfolio (EUR)",
-        color=discord.Color.green(),
+        title="💼 PORTFOLIO OVERZICHT",
+        description="## Live Waarde & Rendement (EUR)\nOverzicht van al je openstaande aandelen en ETF posities.",
+        color=discord.Color.blue(),
         timestamp=discord.utils.utcnow(),
     )
 
@@ -297,23 +406,31 @@ async def show_portfolio(ctx):
         total_val += val
         total_cost += cost
 
-        circle = "🟢" if pl >= 0 else "🔴"
-        field_title = f"{circle} {display_name}   {pl:+.2f} € ({pl_pct:+.2f}%)"
+        diff_symbol = "+" if pl >= 0 else "-"
+        field_title = f"📈 {display_name}"
         field_body = (
-            f"{shares:.4f} shares\n"
-            f"Bought at {buy_p:.2f} € → now {curr_p:.2f} €\n"
-            f"Value **{val:.2f} €** (paid {cost:.2f} €)"
+            f"```diff\n"
+            f"{diff_symbol} Rendement: € {pl:+.2f} ({pl_pct:+.2f}%)\n"
+            f"  Huidige Waarde: € {val:.2f} (Ingelegd: € {cost:.2f})\n"
+            f"  Aantal Aandelen: {shares:.4f} stuks\n"
+            f"  Aankoopkoers: € {buy_p:.2f} ➔ Nu: € {curr_p:.2f}\n"
+            f"```"
         )
         embed.add_field(name=field_title, value=field_body, inline=False)
 
     total_pl = total_val - total_cost
     total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0.0
+    tot_diff = "+" if total_pl >= 0 else "-"
 
     summary_body = (
-        f"Value **{total_val:.2f} €** · paid {total_cost:.2f} €\n"
-        f"Profit/loss **{total_pl:+.2f} €** ({total_pl_pct:+.2f}%)"
+        f"```diff\n"
+        f"{tot_diff} TOTAAL RENDEMENT: € {total_pl:+.2f} ({total_pl_pct:+.2f}%)\n"
+        f"  Totale Portfoliowaarde: € {total_val:.2f}\n"
+        f"  Totaal Geïnvesteerd:    € {total_cost:.2f}\n"
+        f"```"
     )
-    embed.add_field(name="Total", value=summary_body, inline=False)
+    embed.add_field(name="📊 TOTAAL OVERZICHT", value=summary_body, inline=False)
+    embed.set_footer(text="StockWatcher Portfolio Management • Trade Republic Sync")
     await ctx.send(embed=embed)
 
 
@@ -321,14 +438,14 @@ async def show_portfolio(ctx):
 async def watch(ctx, ticker: str):
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     await asyncio.to_thread(alerts.add_watchlist, user_id, ticker)
-    await ctx.send(f"✅ Added **{ticker.upper()}** to watchlist.")
+    await ctx.send(f"✅ **{ticker.upper()}** toegevoegd aan watchlist.")
 
 
 @bot.command()
 async def unwatch(ctx, ticker: str):
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     await asyncio.to_thread(alerts.remove_watchlist, user_id, ticker)
-    await ctx.send(f"✅ Removed **{ticker.upper()}** from watchlist.")
+    await ctx.send(f"✅ **{ticker.upper()}** verwijderd uit watchlist.")
 
 
 @bot.command()
@@ -336,7 +453,7 @@ async def watchlist(ctx):
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     tickers = await asyncio.to_thread(alerts.get_watchlist, user_id)
     if not tickers:
-        await ctx.send("Watchlist is empty. Add stocks with `!watch TICKER`.")
+        await ctx.send("Watchlist is leeg. Voeg tickers toe via `!watch TICKER`.")
     else:
         await ctx.send(f"📋 **Watchlist**: {', '.join(tickers)}")
 
@@ -346,12 +463,13 @@ async def scan_watchlist(ctx):
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     watchlist_items = alerts.get_watchlist(user_id)
     if not watchlist_items:
-        await ctx.send("⚠️ Watchlist is empty. Add tickers using `!watch TICKER`.")
+        await ctx.send("⚠️ Watchlist is leeg. Voeg tickers toe met `!watch TICKER`.")
         return
 
     async with ctx.typing():
         embed = discord.Embed(
-            title="🔍 Technical Analysis Scan (EUR)",
+            title="🔍 TECHNISCHE ANALYSE SCAN",
+            description="## Watchlist Markt Overzicht (EUR)",
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
@@ -364,22 +482,26 @@ async def scan_watchlist(ctx):
                 pct = res.get("pct_change", 0.0)
                 verdict = res.get("verdict", "NEUTRAL ⚖️")
 
-                circle = "🟢" if pct >= 0 else "🔴"
-                field_name = f"{circle} {display_n} — €{price:.2f} ({pct:+.2f}%)"
+                diff_sym = "+" if pct >= 0 else "-"
+                field_name = f"📈 {display_n}"
                 field_value = (
-                    f"**Verdict:** {verdict}\n"
-                    f"• **RSI:** `{res.get('rsi', 0.0):.1f}` | **ATR:** `€{res.get('atr', 0.0):.2f}`\n"
-                    f"• **Stoch %K:** `{res['stochastic']['k']:.1f}` | **OBV:** `{res['obv']['trend'].title()}`\n"
-                    f"• **Key Reasons:** {', '.join(res.get('reasons', [])[:2])}"
+                    f"```diff\n"
+                    f"{diff_sym} Koers: € {price:.2f} ({pct:+.2f}%)\n"
+                    f"  Advies Verdict: {verdict}\n"
+                    f"```\n"
+                    f"• **RSI:** `{res.get('rsi', 0.0):.1f}` | **EMA20:** `€{res.get('ema20', price):.2f}`\n"
+                    f"• **Stoch RSI:** `{res.get('stoch_rsi', {}).get('k', 50.0):.1f}` | **OBV:** `{res.get('obv', {}).get('trend', 'neutral').title()}`\n"
+                    f"• **Redenen:** {', '.join(res.get('reasons', [])[:2])}"
                 )
                 embed.add_field(name=field_name, value=field_value, inline=False)
             except Exception as e:
                 embed.add_field(
                     name=f"⚠️ {get_display_name(ticker)}",
-                    value=f"Error scanning: {e}",
+                    value=f"Fout bij scannen: {e}",
                     inline=False,
                 )
 
+        embed.set_footer(text="StockWatcher Technical Analysis Engine")
         await ctx.send(embed=embed)
 
 
@@ -394,33 +516,186 @@ async def check_ticker(ctx, ticker: str):
             verdict = res.get("verdict", "NEUTRAL ⚖️")
 
             embed = discord.Embed(
-                title=f"🔍 Technical Check: {display_n}",
+                title=f"🔍 TECHNISCHE ANALYSE: {display_n}",
+                description=(
+                    f"## Huidige Koers: € {price:.2f} (`{pct:+.2f}%`)\n"
+                    f"### Advies Verdict: **{verdict}**"
+                ),
                 color=discord.Color.green() if pct >= 0 else discord.Color.red(),
                 timestamp=discord.utils.utcnow(),
             )
             embed.add_field(
-                name="Market Overview",
-                value=f"• **Price:** €{price:.2f}\n• **Change:** {pct:+.2f}%\n• **Verdict:** {verdict}",
-                inline=False,
-            )
-            embed.add_field(
-                name="Technical Indicators",
+                name="📊 Technische Indicatoren",
                 value=(
-                    f"• **RSI (14):** `{res.get('rsi', 0.0):.1f}`\n"
-                    f"• **ATR (14):** `€{res.get('atr', 0.0):.2f}`\n"
-                    f"• **Stochastic %K:** `{res['stochastic']['k']:.1f}` ({res['stochastic']['status']})\n"
-                    f"• **OBV Trend:** `{res['obv']['trend'].title()}`"
+                    f"```yaml\n"
+                    f"RSI (14):        {res.get('rsi', 0.0):.1f}\n"
+                    f"EMA (20):        € {res.get('ema20', price):.2f}\n"
+                    f"ATR (14):        € {res.get('atr', 0.0):.2f}\n"
+                    f"Stoch RSI %K:    {res.get('stoch_rsi', {}).get('k', 50.0):.1f} ({res.get('stoch_rsi', {}).get('status', 'neutral')})\n"
+                    f"OBV Trend:       {res.get('obv', {}).get('trend', 'neutral').title()}\n"
+                    f"```"
                 ),
                 inline=False,
             )
             embed.add_field(
-                name="Signals & Reasons",
-                value="\n".join([f"• {r}" for r in res.get("reasons", [])]) or "None",
+                name="📋 Signaal Redenen",
+                value="\n".join([f"• **{r}**" for r in res.get("reasons", [])]) or "Geen specifieke signalen",
                 inline=False,
             )
+            embed.set_footer(text="StockWatcher Technical Analysis Engine")
             await ctx.send(embed=embed)
         except Exception as e:
-            await ctx.send(f"❌ Failed to check {ticker}: {e}")
+            await ctx.send(f"❌ Fout bij het analyseren van {ticker}: {e}")
+
+
+@bot.command(name="kelly")
+async def kelly_cmd(ctx, win_rate: str, win_loss_ratio: str):
+    """Berekent de optimale positiegrootte via het Kelly-criterium."""
+    try:
+        w_rate = _parse_float(win_rate)
+        wl_ratio = _parse_float(win_loss_ratio)
+
+        if w_rate > 1:
+            w_rate = w_rate / 100.0
+
+        fraction = quant.calculate_kelly_criterion(w_rate, wl_ratio)
+        pct = fraction * 100.0
+
+        embed = discord.Embed(
+            title="🎲 KELLY-CRITERIUM RISICO ADVIES",
+            description=f"## Optimaal Inzetpercentage: **`{pct:.2f}%`** van je vermogen",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="📊 Invoerparameters & Uitkomst",
+            value=(
+                f"```yaml\n"
+                f"Winstkans Schatting:  {w_rate * 100:.1f}%\n"
+                f"Risk/Reward Ratio:   {wl_ratio:.2f}\n"
+                f"Kelly Fraction:      {fraction:.4f}\n"
+                f"Aanbevolen Positie:  {pct:.2f}%\n"
+                f"```"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="StockWatcher Quantitative Engine • Position Sizing")
+        await ctx.send(embed=embed)
+    except ValueError as e:
+        await ctx.send(f"⚠️ Invoerfout: {e}")
+    except Exception as e:
+        await ctx.send(f"❌ Fout bij berekening: {e}")
+
+
+@bot.command(name="montecarlo")
+async def montecarlo_cmd(ctx, capital: str, daily_return_pct: str, volatility_pct: str, days: int = 252):
+    """Voert een Monte Carlo-simulatie uit op portfolio-ontwikkeling."""
+    async with ctx.typing():
+        try:
+            start_cap = _parse_float(capital)
+            ret = _parse_float(daily_return_pct) / 100.0
+            vol = _parse_float(volatility_pct) / 100.0
+
+            res = quant.run_monte_carlo_simulation(start_cap, ret, vol, days=int(days))
+
+            embed = discord.Embed(
+                title=f"🎲 MONTE CARLO SIMULATIE ({days} HANDELSDAGEN)",
+                description=f"## Startkapitaal: € {start_cap:.2f}\nSimulatie uitgevoerd over 1.000 willekeurige marktscenario's.",
+                color=discord.Color.purple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.add_field(
+                name="📈 Verwacht Eindvermogen Statistieken",
+                value=(
+                    f"```yaml\n"
+                    f"Gemiddelde:          € {res['mean_final']:.2f}\n"
+                    f"Mediaan:             € {res['median_final']:.2f}\n"
+                    f"95% Betrouwbaar:     € {res['percentile_5']:.2f} tot € {res['percentile_95']:.2f}\n"
+                    f"Slechtste Scenario:  € {res['worst_case']:.2f}\n"
+                    f"Beste Scenario:      € {res['best_case']:.2f}\n"
+                    f"```"
+                ),
+                inline=False,
+            )
+            embed.set_footer(text="StockWatcher Stochastic Engine • Risk Analysis")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"❌ Fout bij het uitvoeren van Monte Carlo-simulatie: {e}")
+
+
+@bot.command(name="testalert")
+@commands.has_permissions(administrator=True)
+async def test_alert_cmd(ctx):
+    """Bijeen gebracht commando met grote, goed leesbare Discord embeds."""
+    target_channel = (
+        bot.get_channel(ALERT_CHANNEL_ID or LOG_CHANNEL_ID)
+        if (ALERT_CHANNEL_ID or LOG_CHANNEL_ID)
+        else ctx.channel
+    )
+
+    if not target_channel:
+        await ctx.send("⚠️ Geen alert of log kanaal gevonden/ingesteld.")
+        return
+
+    # 1. Grote Price Spike Alert
+    spike_embed = discord.Embed(
+        title="🚀 PRICE SPIKE DETECTED",
+        description=(
+            "## Apple Inc. (APC.DE)\n"
+            "De koers stijgt krachtig buiten de ingestelde drempelwaarde!\n\n"
+            "```diff\n"
+            "+ Verandering: +5.20%\n"
+            "+ Oude Koers:  € 309.12\n"
+            "+ Nieuwe Koers: € 325.20\n"
+            "```"
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow(),
+    )
+    spike_embed.add_field(
+        name="📊 Markt Details",
+        value="• **Drempelwaarde:** `±2.0%`\n• **Status:** Actieve markt-uitbraak",
+        inline=False,
+    )
+    spike_embed.set_footer(text="StockWatcher Real-Time Scanner • Trading Alert")
+
+    # 2. Grote Early Warning Alert (Quant & Kelly)
+    warning_embed = discord.Embed(
+        title="🚨 QUANT EARLY WARNING ALERT",
+        description=(
+            "## Vanguard FTSE All-World (VWCE.DE)\n"
+            "Er is een marktpatroon gedetecteerd **vóór** de daadwerkelijke koersuitbraak!\n\n"
+            "### ⚠️ Signaal Analyse\n"
+            "• **Bollinger Squeeze:** Volatiliteit is extreem laag opgedroogd.\n"
+            "• **Verwachting:** Een krachtige koersbeweging staat op uitbreken.\n"
+            "• **Huidige Koers:** `€ 170.00` (`+0.45%`)"
+        ),
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    warning_embed.add_field(
+        name="🎲 Kelly-Criterium Risico Advies",
+        value=(
+            "```yaml\n"
+            "Aanbevolen Inzet: 33.33% van je totale vermogen\n"
+            "Winstkans Schatting: 55.0%\n"
+            "Risk/Reward Ratio: 1.50\n"
+            "```"
+        ),
+        inline=False,
+    )
+    warning_embed.add_field(
+        name="🎯 ACTIE ADVIES",
+        value="### **BUY 🟢 (Koopsignaal / Bodem inzicht)**",
+        inline=False,
+    )
+    warning_embed.set_footer(text="Reageer met een emoji op dit bericht om alerts voor 3 uur te pauzeren • StockWatcher Engine")
+
+    await target_channel.send(embed=spike_embed)
+    await target_channel.send(embed=warning_embed)
+
+    if target_channel.id != ctx.channel.id:
+        await ctx.send(f"✅ Grote test alerts succesvol verzonden naar <#{target_channel.id}>!")
 
 
 class CLIContext:
@@ -470,78 +745,3 @@ async def execute_unified_command(user_id: str, command_line: str):
         print(f"⚠️ Command argument error: {e}")
     except Exception as e:
         print(f"❌ Execution Error: {e}")
-
-# Toevoegen onderaan bot.py
-
-import quant
-
-@bot.command(name="kelly")
-async def kelly_cmd(ctx, win_rate: str, win_loss_ratio: str):
-    """Berekent de optimale positiegrootte via het Kelly-criterium."""
-    try:
-        w_rate = _parse_float(win_rate)
-        wl_ratio = _parse_float(win_loss_ratio)
-
-        # Als win_rate als percentage is ingevoerd (bijv 55 in plaats van 0.55)
-        if w_rate > 1:
-            w_rate = w_rate / 100.0
-
-        fraction = quant.calculate_kelly_criterion(w_rate, wl_ratio)
-        pct = fraction * 100.0
-
-        embed = discord.Embed(
-            title="🎲 Kelly-criterium Berekening",
-            color=discord.Color.blue(),
-        )
-        embed.add_field(
-            name="Invoerparameters",
-            value=f"• **Winstkans:** `{w_rate * 100:.1f}%`\n• **Winst/Verlies Verhouding:** `{wl_ratio:.2f}`",
-            inline=False,
-        )
-        embed.add_field(
-            name="Advies Positiegrootte",
-            value=f"• **Kelly Fraction:** `{fraction:.4f}`\n• **Aanbevolen inzet:** **`{pct:.2f}%`** van je totale vermogen",
-            inline=False,
-        )
-        await ctx.send(embed=embed)
-    except ValueError as e:
-        await ctx.send(f"⚠️ Invoerfout: {e}")
-    except Exception as e:
-        await ctx.send(f"❌ Fout bij berekening: {e}")
-
-
-@bot.command(name="montecarlo")
-async def montecarlo_cmd(ctx, capital: str, daily_return_pct: str, volatility_pct: str, days: int = 252):
-    """Voert een Monte Carlo-simulatie uit op portfolio-ontwikkeling."""
-    async with ctx.typing():
-        try:
-            start_cap = _parse_float(capital)
-            ret = _parse_float(daily_return_pct) / 100.0
-            vol = _parse_float(volatility_pct) / 100.0
-
-            res = quant.run_monte_carlo_simulation(start_cap, ret, vol, days=int(days))
-
-            embed = discord.Embed(
-                title=f"🎲 Monte Carlo Simulatie ({days} handelsdagen)",
-                description=f"Simulatie uitgevoerd over 1.000 willekeurige marktscenario's.",
-                color=discord.Color.purple(),
-            )
-            embed.add_field(
-                name="Startkapitaal",
-                value=f"€{start_cap:.2f}",
-                inline=False,
-            )
-            embed.add_field(
-                name="Verwacht Eindvermogen",
-                value=(
-                    f"• **Gemiddelde:** €`{res['mean_final']:.2f}`\n"
-                    f"• **Mediaan:** €`{res['median_final']:.2f}`\n"
-                    f"• **95% Betrouwbaarheidsinterval:** €`{res['percentile_5']:.2f}` tot €`{res['percentile_95']:.2f}`\n"
-                    f"• **Slechtste Scenario (Worst Case):** €`{res['worst_case']:.2f}`\n"
-                    f"• **Beste Scenario (Best Case):** €`{res['best_case']:.2f}`"
-                ),
-                inline=False,
-            )
-            await ctx.send(embed=embed)
-        except Exception as e:
-            await ctx.send(f"❌ Fout bij het uitvoeren van Monte Carlo-simulatie: {e}")
