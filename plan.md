@@ -69,6 +69,7 @@ Implement and verify:
 - Stable alert identifiers and consistent signal categories.
 - A recorded entry price and timestamp.
 - Clearly defined evaluation horizons, such as 1, 3 and 5 trading days.
+- **Peak duration & holding period tracking:** Record the number of trading days until the maximum favorable excursion (peak return) is reached before a trend reversal or dip occurs, storing this in the database to support future supervised machine learning models.
 - An evaluation status such as `pending`, `completed`, or `unscorable`.
 - Protection against evaluating the same outcome repeatedly.
 - Efficient data refreshes: fetch historical prices once per ticker per evaluation run, rather than once per alert.
@@ -105,6 +106,7 @@ For a first version, use the following simple definition:
 - SELL: the price is lower at the end of that period.
 - HOLD: track separately; do not treat it as a BUY or SELL prediction.
 - No valid outcome: leave it unscored and report why.
+- **Peak duration metric:** Track the trading days elapsed from alert execution until the peak price movement (Maximum Favorable Excursion) before a dip.
 
 Start with a one-trading-day horizon, then evaluate three- and five-trading-day horizons separately.
 
@@ -123,6 +125,7 @@ The initial report should contain:
 - Sample size: number of completed predictions.
 - Average price return: average percentage return after the signal, with BUY and SELL handled consistently.
 - ATR-threshold success rate: the existing stricter outcome metric, reported separately.
+- **Average optimal holding duration:** The mean number of trading days required for trades to reach their peak return.
 
 For directional accuracy:
 
@@ -148,14 +151,14 @@ Once data is available, calculate actual historical rates from completed outcome
 
 The report should show the results by signal type and evaluation horizon.
 
-| Signal type | Horizon        | Correct | Scored | Accuracy |
-| ----------- | -------------- | ------- | ------ | -------- |
-| BUY         | 1 trading day  | —       | —      | —        |
-| SELL        | 1 trading day  | —       | —      | —        |
-| BUY         | 3 trading days | —       | —      | —        |
-| SELL        | 3 trading days | —       | —      | —        |
-| BUY         | 5 trading days | —       | —      | —        |
-| SELL        | 5 trading days | —       | —      | —        |
+| Signal type | Horizon        | Correct | Scored | Accuracy | Avg. Peak Days |
+| ----------- | -------------- | ------- | ------ | -------- | -------------- |
+| BUY         | 1 trading day  | —       | —      | —        | —              |
+| SELL        | 1 trading day  | —       | —      | —        | —              |
+| BUY         | 3 trading days | —       | —      | —        | —              |
+| SELL        | 3 trading days | —       | —      | —        | —              |
+| BUY         | 5 trading days | —       | —      | —        | —              |
+| SELL        | 5 trading days | —       | —      | —        | —              |
 
 The dashes are intentional: the results must come from real evaluated alerts, not estimates.
 
@@ -204,6 +207,7 @@ A first alert could look like this:
 Ticker: EXAMPLE
 Signal: BUY
 Evaluation horizon: 5 trading days
+Estimated holding period to peak: ~4 trading days
 
 Historical directional accuracy: 60%
 Completed comparable signals: 100
@@ -264,42 +268,15 @@ A sensible order is:
 
 Your Howest material on data exploration and regression can help with feature analysis, train/test splits and model evaluation. It does not, by itself, establish that a particular indicator predicts stock prices.
 
-## What to do next, in practical order
+---
 
 ## Implementation checklist
 
-0 of 8
-
-Back up the current working code and establish the baseline
-
-Phase 1 · Save the current version, run it and record existing errors.
-
-Audit data.py and fix price/database consistency
-
-Phase 1 · Inspect quote writes, missing OHLCV values, currency handling and dates.
-
-Fix tracker evaluation and repeated processing
-
-Phase 1 · Separate pending from unscorable outcomes and avoid redundant data refreshes.
-
-Add and run tests for data, signals and tracker
-
-Phase 1 · Use saved inputs for repeatable tests, then perform an end-to-end scan.
-
-Define the directional success rule and horizons
-
-Phase 2 · Start with 1, 3 and 5 trading days; keep ATR-based success separate.
-
-Generate a real historical accuracy report
-
-Phase 2 · Report correct, scored, unscored, accuracy and sample size by signal type.
-
-Add the historical-rate baseline predictor
-
-Phase 3 · Use completed comparable signals and show insufficient data when needed.
-
-Run a later-period test against a benchmark
-
-Phase 4 · Keep test outcomes out of the historical estimate until evaluation.
-
-Copy checklist
+- [ ] Back up the current working code and establish the baseline *(Phase 1)*
+- [ ] Audit `data.py` and fix price/database consistency *(Phase 1)*
+- [ ] Fix tracker evaluation, prevent redundant loops, and implement peak-duration / holding-period logging *(Phase 1)*
+- [ ] Add and run tests for data, signals and tracker *(Phase 1)*
+- [ ] Define directional success rules, horizons, and peak-tracking metrics *(Phase 2)*
+- [ ] Generate a real historical accuracy and holding-duration report *(Phase 2)*
+- [ ] Add the historical-rate baseline predictor *(Phase 3)*
+- [ ] Run a later-period test against a benchmark *(Phase 4)*
