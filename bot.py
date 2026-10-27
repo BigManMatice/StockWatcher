@@ -11,9 +11,10 @@ import data
 import portfolio
 import quant
 import signals
+import tracker
 from stockName import get_display_name
 
-# Cooldown tracking: { ticker: { "last_sent": datetime, "last_price": float, "muted_until": datetime } }
+# Cooldown & state tracking: { ticker: { "last_sent": datetime, "last_price": float, "last_warning": str, "muted_until": datetime } }
 alert_tracker = {}
 
 intents = discord.Intents.default()
@@ -61,7 +62,7 @@ async def on_raw_reaction_add(payload):
                 if ticker in embed_text or display_name in embed_text:
                     now = datetime.utcnow()
                     if ticker not in alert_tracker:
-                        alert_tracker[ticker] = {"last_sent": datetime.min, "last_price": 0.0, "muted_until": datetime.min}
+                        alert_tracker[ticker] = {"last_sent": datetime.min, "last_price": 0.0, "last_warning": "", "muted_until": datetime.min}
                     
                     alert_tracker[ticker]["muted_until"] = now + timedelta(hours=3)
                     await channel.send(f"🔕 Alert voor **{display_name}** is gepauzeerd voor **3 uur** (reactie-stop actief).")
@@ -89,7 +90,7 @@ async def set_alert_threshold(ctx, percentage: str):
         )
         await ctx.send(embed=embed)
     except ValueError:
-        await ctx.send("⚠️ Please provide a valid number. Example: `!setalert 2.5` or `!setalert 2,5` storm")
+        await ctx.send("⚠️ Please provide a valid number. Example: `!setalert 2.5`")
 
 
 @set_alert_threshold.error
@@ -109,34 +110,6 @@ async def view_alert_threshold(ctx):
     )
     await ctx.send(embed=embed)
 
-import tracker
-
-@bot.command(name="accuracy")
-async def show_accuracy(ctx):
-    """Toont het historische zekerheidspercentage en de accuraatheid van de bot."""
-    async with ctx.typing():
-        tracker.update_alert_outcomes()
-        stats = tracker.get_accuracy_stats()
-
-        embed = discord.Embed(
-            title="🎯 BOT SIGNALS ACCURACY TRACKER",
-            description="## Historische Betrouwbaarheid & Performance Tracker\nResultaten van uitgezonden alerts vergeleken met marktkoersen.",
-            color=discord.Color.blue(),
-            timestamp=discord.utils.utcnow(),
-        )
-        embed.add_field(
-            name="📊 Totale Model Statistieken",
-            value=(
-                f"```yaml\n"
-                f"Zekerheidspercentage: {stats['accuracy_pct']:.1f}%\n"
-                f"Totaal Geëvalueerd:    {stats['total']} alerts\n"
-                f"Winstgevende Signals: {stats['wins']} keer correct\n"
-                f"```"
-            ),
-            inline=False,
-        )
-        embed.set_footer(text="StockWatcher Quantitative Validation Engine")
-        await ctx.send(embed=embed)
 
 @tasks.loop(minutes=1)
 async def minute_market_scanner():
@@ -159,12 +132,11 @@ async def minute_market_scanner():
         watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
         now = datetime.utcnow()
 
-        # 1. Update de status van historische alerts in de SQLite database (1d, 3d, 7d uitkomsten)
+        # Update historische resultaten van eerdere alerts
         await asyncio.to_thread(tracker.update_alert_outcomes)
 
-        # 2. Bereken huidige totale portfoliowaarde voor dynamische position sizing
         holdings = portfolio.get_portfolio("default_user")
-        tot_portfolio_val = sum(h.get("value", h["shares"] * h["buy_price"]) for h in holdings) if holdings else 298.00
+        tot_portfolio_val = sum(h.get("value", h["shares"] * h["buy_price"]) for h in holdings) if holdings else 150.37
 
         for ticker in watchlist_items:
             display_name = get_display_name(ticker)
@@ -172,7 +144,7 @@ async def minute_market_scanner():
                 quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
                 price = quote["price"]
 
-                # --- 1. PRICE SPIKE ALERT CHECK ---
+                # 1. Price Spike Check
                 if ticker in last_prices:
                     prev_price = last_prices[ticker]
                     spike_pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
@@ -207,39 +179,44 @@ async def minute_market_scanner():
 
                 last_prices[ticker] = price
 
-                # --- 2. QUANT EARLY WARNING SCAN ---
+                # 2. Quant Early Warning Scan
                 res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker, tot_portfolio_val)
                 warnings = res.get("early_warnings", [])
 
                 if warnings:
-                    # Log iedere minuut naar de console/terminal
                     print(f"[SCAN LOG {now.strftime('%H:%M:%S')}] {ticker}: {res.get('action', 'HOLD')} | {warnings[0]}")
 
                     tracker_state = alert_tracker.get(ticker, {
                         "last_sent": datetime.min,
                         "last_price": price,
+                        "last_warning": "",
                         "muted_until": datetime.min
                     })
 
                     time_since_last = now - tracker_state["last_sent"]
                     is_muted = now < tracker_state["muted_until"]
                     price_diff_pct = abs((price - tracker_state["last_price"]) / tracker_state["last_price"] * 100) if tracker_state["last_price"] > 0 else 0.0
+                    primary_warning = warnings[0] if warnings else ""
 
-                    # Stuur Discord alert als:
-                    # - 20 minuten voorbij zijn en NIET gemuted, OF
-                    # - De koers nog meer beweegt (>= 1.0% breakout verschil)
-                    should_send_alert = (time_since_last >= timedelta(minutes=20) and not is_muted) or (price_diff_pct >= 1.0)
+                    # SLIMME ANTI-SPAM FILTER:
+                    # Stuur alleen als het signaal veranderd is, de koers >= 1.5% beweegt, of er minstens 2 uur verstreken zijn (en niet gemuted).
+                    signal_changed = primary_warning != tracker_state["last_warning"]
+                    time_window_passed = time_since_last >= timedelta(hours=2) and not is_muted
+                    big_price_move = price_diff_pct >= 1.5
+
+                    should_send_alert = signal_changed or big_price_move or time_window_passed
 
                     if should_send_alert:
                         action_text = res.get("action", "HOLD ⚖️")
                         embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
-                        primary_warning = warnings[0]
 
-                        # Log signaal naar de SQLite database voor historisch zekerheidstracking
                         await asyncio.to_thread(tracker.log_alert, ticker, primary_warning, action_text, price)
-
-                        # Haal historische precisie statistieken op van dit specifieke type signaal
                         hist_stats = await asyncio.to_thread(tracker.get_accuracy_stats, primary_warning)
+
+                        risk_data = res.get("risk_rule_1pct", {})
+                        max_eur_val = risk_data.get("max_eur", 0.0)
+                        max_shares_val = risk_data.get("max_shares", 0.0)
+                        stop_loss_val = risk_data.get("stop_loss_price", 0.0)
 
                         warning_embed = discord.Embed(
                             title=f"🚨 QUANT EARLY WARNING ALERT",
@@ -259,10 +236,10 @@ async def minute_market_scanner():
                                 f"```yaml\n"
                                 f"Portfoliowaarde:     € {tot_portfolio_val:.2f}\n"
                                 f"Winstkans Schatting: {res['win_rate']:.1f}%\n"
-                                f"Dynamische RRR:      {res['win_loss_ratio']:.2f}\n"
+                                f"Dynamische RRR:      {res['dynamic_rrr']:.2f}\n"
                                 f"Tail Risk (CVaR 95): {res['cvar_95']:.2f}%\n"
-                                f"Max 1% Risico-Inzet: € {res['risk_rule_1pct']['max_eur']:.2f} ({res['risk_rule_1pct']['max_shares']:.4f} stuks)\n"
-                                f"Stop-Loss Koers:     € {res['risk_rule_1pct']['stop_loss_price']:.2f}\n"
+                                f"Max 1% Risico-Inzet: € {max_eur_val:.2f} ({max_shares_val:.4f} stuks)\n"
+                                f"Stop-Loss Koers:     € {stop_loss_val:.2f}\n"
                                 f"```"
                             ),
                             inline=False,
@@ -282,11 +259,11 @@ async def minute_market_scanner():
                         if target_send_channel:
                             await target_send_channel.send(embed=warning_embed)
 
-                        # Update tracker state
                         alert_tracker[ticker] = {
                             "last_sent": now,
                             "last_price": price,
-                            "muted_until": tracker_state["muted_until"] if not (price_diff_pct >= 1.0) else datetime.min,
+                            "last_warning": primary_warning,
+                            "muted_until": tracker_state["muted_until"] if not big_price_move else datetime.min,
                         }
 
             except Exception as e:
@@ -300,6 +277,7 @@ async def minute_market_scanner():
 async def before_scanner():
     await bot.wait_until_ready()
 
+
 @bot.event
 async def on_ready():
     bot_name = bot.user.name if bot.user else "StonksBot"
@@ -307,6 +285,34 @@ async def on_ready():
     print(f"Logged in as {bot_name} ({bot_id})")
     if not minute_market_scanner.is_running():
         minute_market_scanner.start()
+
+
+@bot.command(name="accuracy")
+async def show_accuracy(ctx):
+    """Toont het historische zekerheidspercentage en de accuraatheid van de bot."""
+    async with ctx.typing():
+        tracker.update_alert_outcomes()
+        stats = tracker.get_accuracy_stats()
+
+        embed = discord.Embed(
+            title="🎯 BOT SIGNALS ACCURACY TRACKER",
+            description="## Historische Betrouwbaarheid & Performance Tracker\nResultaten van uitgezonden alerts vergeleken met marktkoersen.",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="📊 Totale Model Statistieken",
+            value=(
+                f"```yaml\n"
+                f"Zekerheidspercentage: {stats['accuracy_pct']:.1f}%\n"
+                f"Totaal Geëvalueerd:    {stats['total']} alerts\n"
+                f"Winstgevende Signals: {stats['wins']} keer correct\n"
+                f"```"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="StockWatcher Quantitative Validation Engine")
+        await ctx.send(embed=embed)
 
 
 @bot.command(name="help")
@@ -342,7 +348,8 @@ async def help_cmd(ctx):
         value=(
             "`!check <ticker>` — Toon live koers & indicatoren\n"
             "`!kelly <win_rate> <win_loss_ratio>` — Bereken optimale positiegrootte\n"
-            "`!montecarlo <kapitaal> <dag_rendement%> <volatiliteit%> [dagen]` — Voer portfolio simulatie uit"
+            "`!montecarlo <kapitaal> <dag_rendement%> <volatiliteit%> [dagen]` — Voer portfolio simulatie uit\n"
+            "`!accuracy` — Toon historische model accuraatheid"
         ),
         inline=False,
     )
@@ -355,7 +362,6 @@ async def help_cmd(ctx):
         ),
         inline=False,
     )
-    embed.add_field(name="🌐 Overig", value="`!ping` — Controleer bot vertraging", inline=False)
     embed.set_footer(text="Signalen zijn geen financieel advies. • Alle prijzen in EUR")
     await ctx.send(embed=embed)
 
@@ -401,7 +407,7 @@ async def add_cmd(ctx, ticker: str, total_paid: str, buy_price: str):
         )
         await ctx.send(embed=embed)
     except ValueError:
-        await ctx.send("⚠️ Ongeldige getallen ingevoerd. Voorbeeld: `!add AAPL 75 309,12` of `!add AAPL 75 309.12`")
+        await ctx.send("⚠️ Ongeldige getallen ingevoerd. Voorbeeld: `!add AAPL 75 309,12`")
     except Exception as e:
         await ctx.send(f"⚠️ Fout bij toevoegen: {e}")
 
@@ -534,7 +540,6 @@ async def scan_watchlist(ctx):
                     f"  Advies Verdict: {verdict}\n"
                     f"```\n"
                     f"• **RSI:** `{res.get('rsi', 0.0):.1f}` | **EMA20:** `€{res.get('ema20', price):.2f}`\n"
-                    f"• **Stoch RSI:** `{res.get('stoch_rsi', {}).get('k', 50.0):.1f}` | **OBV:** `{res.get('obv', {}).get('trend', 'neutral').title()}`\n"
                     f"• **Redenen:** {', '.join(res.get('reasons', [])[:2])}"
                 )
                 embed.add_field(name=field_name, value=field_value, inline=False)
@@ -575,8 +580,6 @@ async def check_ticker(ctx, ticker: str):
                     f"RSI (14):        {res.get('rsi', 0.0):.1f}\n"
                     f"EMA (20):        € {res.get('ema20', price):.2f}\n"
                     f"ATR (14):        € {res.get('atr', 0.0):.2f}\n"
-                    f"Stoch RSI %K:    {res.get('stoch_rsi', {}).get('k', 50.0):.1f} ({res.get('stoch_rsi', {}).get('status', 'neutral')})\n"
-                    f"OBV Trend:       {res.get('obv', {}).get('trend', 'neutral').title()}\n"
                     f"```"
                 ),
                 inline=False,
@@ -670,7 +673,6 @@ async def montecarlo_cmd(ctx, capital: str, daily_return_pct: str, volatility_pc
 @bot.command(name="testalert")
 @commands.has_permissions(administrator=True)
 async def test_alert_cmd(ctx):
-    """Bijeen gebracht commando met grote, goed leesbare Discord embeds."""
     target_channel = (
         bot.get_channel(ALERT_CHANNEL_ID or LOG_CHANNEL_ID)
         if (ALERT_CHANNEL_ID or LOG_CHANNEL_ID)
@@ -681,7 +683,6 @@ async def test_alert_cmd(ctx):
         await ctx.send("⚠️ Geen alert of log kanaal gevonden/ingesteld.")
         return
 
-    # 1. Grote Price Spike Alert
     spike_embed = discord.Embed(
         title="🚀 PRICE SPIKE DETECTED",
         description=(
@@ -703,7 +704,6 @@ async def test_alert_cmd(ctx):
     )
     spike_embed.set_footer(text="StockWatcher Real-Time Scanner • Trading Alert")
 
-    # 2. Grote Early Warning Alert (Quant & Kelly)
     warning_embed = discord.Embed(
         title="🚨 QUANT EARLY WARNING ALERT",
         description=(
@@ -711,19 +711,21 @@ async def test_alert_cmd(ctx):
             "Er is een marktpatroon gedetecteerd **vóór** de daadwerkelijke koersuitbraak!\n\n"
             "### ⚠️ Signaal Analyse\n"
             "• **Bollinger Squeeze:** Volatiliteit is extreem laag opgedroogd.\n"
-            "• **Verwachting:** Een krachtige koersbeweging staat op uitbreken.\n"
             "• **Huidige Koers:** `€ 170.00` (`+0.45%`)"
         ),
         color=discord.Color.gold(),
         timestamp=discord.utils.utcnow(),
     )
     warning_embed.add_field(
-        name="🎲 Kelly-Criterium Risico Advies",
+        name="🎲 Quant Risicobeheer & Position Sizing",
         value=(
             "```yaml\n"
-            "Aanbevolen Inzet: 33.33% van je totale vermogen\n"
-            "Winstkans Schatting: 55.0%\n"
-            "Risk/Reward Ratio: 1.50\n"
+            "Portfoliowaarde:     € 150.37\n"
+            "Winstkans Schatting: 62.0%\n"
+            "Dynamische RRR:      1.10\n"
+            "Tail Risk (CVaR 95): 1.68%\n"
+            "Max 1% Risico-Inzet: € 37.59 (0.2211 stuks)\n"
+            "Stop-Loss Koers:     € 98.00\n"
             "```"
         ),
         inline=False,
