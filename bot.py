@@ -137,27 +137,12 @@ async def minute_market_scanner():
         # Update historische resultaten van eerdere alerts
         await asyncio.to_thread(tracker.update_alert_outcomes)
 
-        # Haal direct de totale portfoliowaarde op voor deze ene gebruiker via de nieuwe functie
-        tot_portfolio_val = portfolio.get_portfolio_total(username)
+        # Haal direct de totale portfoliowaarde op voor de opgegeven gebruiker (bijv. "matice")
         try:
-            total_sum = 0.0
-            with closing(data._connect()) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT user_id FROM holdings")
-                users = cursor.fetchall()
-                
-                for u in users:
-                    uid = u[0]
-                    holdings_list = portfolio.get_portfolio(uid)
-                    for h in holdings_list:
-                        shares = h.get("shares", 0.0)
-                        curr_p = h.get("price", h.get("buy_price", 0.0)) or h.get("buy_price", 0.0)
-                        total_sum += shares * curr_p
-
-            if total_sum > 0:
-                tot_portfolio_val = total_sum
+            tot_portfolio_val = await asyncio.to_thread(portfolio.get_portfolio_total, username)
         except Exception as e:
-            print(f"[Multi-User Portfolio Error]: {e}")
+            print(f"[Portfolio Total Error]: {e}")
+            tot_portfolio_val = 0.0
 
         for ticker in watchlist_items:
             display_name = get_display_name(ticker)
@@ -190,7 +175,7 @@ async def minute_market_scanner():
                         )
                         spike_embed.add_field(
                             name="📊 Markt Details",
-                            value=f"• **Drempelwaarde:** `±{SPIKE_THRESHOLD_PCT}%`\n• **Status:** Actieve markt-uitbraak",
+                            value=f"• **Drempelwaarde:** `±{SPIKE_THRESHOLD_PCT}%`\n**Status:** Actieve markt-uitbraak",
                             inline=False,
                         )
                         spike_embed.set_footer(text="StockWatcher Real-Time Scanner • Trading Alert")
@@ -227,7 +212,6 @@ async def minute_market_scanner():
                     primary_warning = warnings[0] if warnings else ""
 
                     # SLIMME ANTI-SPAM FILTER:
-                    # Stuur alleen als het signaal veranderd is, de koers >= 1.5% beweegt, of er minstens 2 uur verstreken zijn (en niet gemuted).
                     signal_changed = primary_warning != tracker_state["last_warning"] or "SELL" in action_text
                     time_window_passed = time_since_last >= timedelta(hours=2) and not is_muted
                     big_price_move = price_diff_pct >= 1.5
@@ -241,6 +225,7 @@ async def minute_market_scanner():
                         hist_stats = await asyncio.to_thread(tracker.get_accuracy_stats, primary_warning)
 
                         risk_data = res.get("risk_rule_1pct", {})
+                        max_risk_eur_val = risk_data.get("max_risk_eur", 0.0)
                         max_eur_val = risk_data.get("max_eur", 0.0)
                         max_shares_val = risk_data.get("max_shares", 0.0)
                         stop_loss_val = risk_data.get("stop_loss_price", 0.0)
@@ -265,7 +250,8 @@ async def minute_market_scanner():
                                 f"Winstkans Schatting: {res['win_rate']:.1f}%\n"
                                 f"Dynamische RRR:      {res['dynamic_rrr']:.2f}\n"
                                 f"Tail Risk (CVaR 95): {res['cvar_95']:.2f}%\n"
-                                f"Max 1% Risico-Inzet: € {max_eur_val:.2f} ({max_shares_val:.4f} stuks)\n"
+                                f"Max 1% Risico (EUR): € {max_risk_eur_val:.2f}\n"
+                                f"Max Positie Grootte: € {max_eur_val:.2f} ({max_shares_val:.4f} stuks)\n"
                                 f"Stop-Loss Koers:     € {stop_loss_val:.2f}\n"
                                 f"```"
                             ),

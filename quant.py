@@ -21,7 +21,7 @@ def calculate_expected_shortfall(returns: list, confidence_level: float = 0.95) 
     if not returns or len(returns) < 5:
         return 0.05
     arr = np.array(returns)
-    var_threshold = np.percentile(arr, (1 - confidence_level) * 100)
+    var_threshold = np.percentile(arr, (1.0 - confidence_level) * 100)
     tail_losses = arr[arr <= var_threshold]
     if len(tail_losses) == 0:
         return abs(float(var_threshold))
