@@ -1,19 +1,14 @@
-# stockName.py
+from typing import Dict
 
-TICKER_MAP = {
-    # Stocks
+TICKER_MAP: Dict[str, str] = {
     "AAPL": "APC.DE",
     "MSFT": "MSF.DE",
     "NVDA": "NVD.DE",
     "TSLA": "TSLA",
-
-    # Core Index ETFs
     "S&P500": "CSPX.AS",
     "FTSE": "VWCE.DE",
     "VWCE": "VWCE.DE",
     "FTSE ALL-WORLD": "VWCE.DE",
-
-    # Thematic & Regional ETFs
     "RBOT": "2B76.DE",
     "ROBOTICS": "2B76.DE",
     "2B76": "2B76.DE",
@@ -22,7 +17,7 @@ TICKER_MAP = {
     "EUROPE": "EUNK.DE",
 }
 
-DISPLAY_NAMES = {
+DISPLAY_NAMES: Dict[str, str] = {
     "AAPL": "AAPL (APC.DE)",
     "APC.DE": "AAPL (APC.DE)",
     "MSFT": "MSFT (MSF.DE)",

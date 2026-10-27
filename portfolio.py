@@ -1,10 +1,10 @@
-# portfolio.py
 from contextlib import closing
+from typing import List, Dict, Any, Optional
 import data
 from stockName import get_mapped_ticker, get_display_name
 
 
-def link_discord_account(discord_id: str, custom_username: str):
+def link_discord_account(discord_id: str, custom_username: str) -> None:
     data.init_db()
     clean_user = str(custom_username).strip().lower()
     with closing(data._connect()) as conn, conn:
@@ -15,7 +15,6 @@ def link_discord_account(discord_id: str, custom_username: str):
 
 
 def resolve_user_id(identifier: str) -> str:
-    """Translates a CLI custom username into its linked numeric Discord ID (or vice versa)."""
     data.init_db()
     clean_identifier = str(identifier).strip().lower()
 
@@ -37,8 +36,7 @@ def resolve_user_id(identifier: str) -> str:
     return clean_identifier
 
 
-def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price: float):
-    # Sanitize float inputs if passed as comma-separated strings
+def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price: float) -> None:
     total_paid_val = float(str(total_paid).replace(",", "."))
     buy_price_val = float(str(buy_price).replace(",", "."))
 
@@ -74,7 +72,7 @@ def add_holding(user_identifier: str, ticker: str, total_paid: float, buy_price:
             )
 
 
-def remove_holding(user_identifier: str, ticker: str, shares: float = None) -> bool:
+def remove_holding(user_identifier: str, ticker: str, shares: Optional[float] = None) -> bool:
     data.init_db()
     user_id = resolve_user_id(user_identifier)
     ticker = ticker.upper().strip()
@@ -110,15 +108,12 @@ def remove_holding(user_identifier: str, ticker: str, shares: float = None) -> b
 
 
 def get_portfolio_total(user_identifier: str = "default_user") -> float:
-    """
-    Berekent de totale actuele waarde van het portfolio voor één specifieke gebruiker.
-    Accepteert een custom_username of Discord ID (via resolve_user_id).
-    """
     portfolio_items = get_portfolio(user_identifier)
     total_value = sum(item.get("value", 0.0) for item in portfolio_items)
     return round(total_value, 2)
 
-def get_portfolio(user_identifier: str) -> list:
+
+def get_portfolio(user_identifier: str) -> List[Dict[str, Any]]:
     data.init_db()
     user_id = resolve_user_id(user_identifier)
 
@@ -129,8 +124,7 @@ def get_portfolio(user_identifier: str) -> list:
         ).fetchall()
 
     portfolio_list = []
-    for r in rows:
-        ticker, shares, buy_price = r[0], r[1], r[2]
+    for ticker, shares, buy_price in rows:
         item = {
             "ticker": ticker,
             "shares": shares,
@@ -143,7 +137,7 @@ def get_portfolio(user_identifier: str) -> list:
             item["price"] = price
             item["value"] = shares * price
             item["pl"] = item["value"] - item["cost"]
-            item["pl_pct"] = (item["pl"] / item["cost"] * 100) if item["cost"] > 0 else 0.0
+            item["pl_pct"] = (item["pl"] / item["cost"] * 100.0) if item["cost"] > 0 else 0.0
         except Exception:
             item["price"] = buy_price
             item["value"] = item["cost"]

@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import closing
 from datetime import date
+from typing import Dict, Any
 import pandas as pd
 import requests
 import yfinance as yf
@@ -13,12 +14,11 @@ class DataError(Exception):
     pass
 
 
-def _connect():
+def _connect() -> sqlite3.Connection:
     return sqlite3.connect(config.DB_PATH)
 
 
-def init_db():
-    """Unified single-point SQLite database initialization routine with automatic schema migration."""
+def init_db() -> None:
     with closing(_connect()) as conn, conn:
         conn.execute(
             """
@@ -60,7 +60,6 @@ def init_db():
             """
         )
         
-        # Schema migration check: Ensure legacy watchlist table gets user_id column if needed
         cursor = conn.execute("PRAGMA table_info(watchlist)")
         w_cols = [c[1] for c in cursor.fetchall()]
         if "user_id" not in w_cols:
@@ -88,7 +87,6 @@ def init_db():
 
 
 def get_usd_eur() -> float:
-    """Fetch USD->EUR exchange rate, cached daily in SQLite."""
     init_db()
     today = date.today().isoformat()
 
@@ -98,7 +96,7 @@ def get_usd_eur() -> float:
         ).fetchone()
 
     if row and row[1] == today:
-        return row[0]
+        return float(row[0])
 
     try:
         eurusd = yf.Ticker("EURUSD=X").fast_info["lastPrice"]
@@ -112,7 +110,7 @@ def get_usd_eur() -> float:
             usd_eur_rate = 1.0 / float(data_json[0]["price"])
         except Exception:
             if row:
-                return row[0]
+                return float(row[0])
             usd_eur_rate = 0.89
 
     with closing(_connect()) as conn, conn:
@@ -124,7 +122,7 @@ def get_usd_eur() -> float:
     return usd_eur_rate
 
 
-def _fetch_yfinance_quote(ticker: str) -> dict:
+def _fetch_yfinance_quote(ticker: str) -> Dict[str, Any]:
     try:
         stock = yf.Ticker(ticker)
         info = stock.fast_info
@@ -136,7 +134,7 @@ def _fetch_yfinance_quote(ticker: str) -> dict:
     if price == 0:
         raise DataError(f"yfinance returned zero price for '{ticker}'")
 
-    pct_change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+    pct_change = ((price - prev_close) / prev_close) * 100.0 if prev_close > 0 else 0.0
 
     return {
         "ticker": ticker,
@@ -146,7 +144,7 @@ def _fetch_yfinance_quote(ticker: str) -> dict:
     }
 
 
-def _fetch_fmp_quote(ticker: str) -> dict:
+def _fetch_fmp_quote(ticker: str) -> Dict[str, Any]:
     try:
         url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={config.FMP_KEY}"
         resp = requests.get(url, timeout=10)
@@ -175,7 +173,7 @@ def _fetch_fmp_quote(ticker: str) -> dict:
     }
 
 
-def get_finnhub_quote(ticker: str) -> dict:
+def get_finnhub_quote(ticker: str) -> Dict[str, Any]:
     original_ticker = ticker.upper().strip()
     api_ticker = get_mapped_ticker(original_ticker)
 

@@ -1,12 +1,11 @@
-# alerts.py
 from contextlib import closing
+from typing import List, Tuple, Any, Optional
 import data
 import portfolio
 import signals
 
 
-def add_watchlist(user_identifier: str, ticker: str = None):
-    # Support both add_watchlist(ticker) and add_watchlist(user_id, ticker) for backward compatibility
+def add_watchlist(user_identifier: str, ticker: Optional[str] = None) -> None:
     if ticker is None:
         ticker = user_identifier
         user_identifier = "default_user"
@@ -21,7 +20,7 @@ def add_watchlist(user_identifier: str, ticker: str = None):
         )
 
 
-def remove_watchlist(user_identifier: str, ticker: str = None):
+def remove_watchlist(user_identifier: str, ticker: Optional[str] = None) -> None:
     if ticker is None:
         ticker = user_identifier
         user_identifier = "default_user"
@@ -36,7 +35,7 @@ def remove_watchlist(user_identifier: str, ticker: str = None):
         )
 
 
-def get_watchlist(user_identifier: str = "default_user") -> list:
+def get_watchlist(user_identifier: str = "default_user") -> List[str]:
     data.init_db()
     user_id = portfolio.resolve_user_id(user_identifier)
     with closing(data._connect()) as conn:
@@ -47,15 +46,14 @@ def get_watchlist(user_identifier: str = "default_user") -> list:
     return [r[0] for r in rows]
 
 
-def get_all_global_watchlists() -> list:
-    """Returns all unique tickers monitored across all users."""
+def get_all_global_watchlists() -> List[str]:
     data.init_db()
     with closing(data._connect()) as conn:
         rows = conn.execute("SELECT DISTINCT ticker FROM watchlist ORDER BY ticker").fetchall()
     return [r[0] for r in rows]
 
 
-def scan(user_identifier: str = "default_user"):
+def scan(user_identifier: str = "default_user") -> Tuple[List[Any], List[Any], List[Tuple[str, str]]]:
     data.init_db()
 
     try:

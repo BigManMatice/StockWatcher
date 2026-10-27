@@ -1,7 +1,7 @@
-# bot.py
 import asyncio
-from datetime import datetime, timedelta
-import traceback
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, AsyncGenerator
 import discord
 from discord.ext import commands, tasks
 
@@ -14,10 +14,8 @@ import signals
 import tracker
 from stockName import get_display_name
 
-# Cooldown & state tracking: { ticker: { "last_sent": datetime, "last_price": float, "last_warning": str, "muted_until": datetime } }
-alert_tracker = {}
-# Stel hier de gewenste gebruiker in (bijv. de custom_username uit je variabele)
-username = "matice" # Of "default_user"
+alert_tracker: Dict[str, Dict[str, Any]] = {}
+username: str = "matice"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -32,20 +30,18 @@ if LOG_CHANNEL_ID:
 if ALERT_CHANNEL_ID:
     ALERT_CHANNEL_ID = int(ALERT_CHANNEL_ID)
 
-SPIKE_THRESHOLD_PCT = 2.0
-last_prices = {}
+SPIKE_THRESHOLD_PCT: float = 2.0
+last_prices: Dict[str, float] = {}
 
 
-def _parse_float(val) -> float:
-    """Helper function to cleanly parse string/float numbers containing either commas or dots."""
+def _parse_float(val: str | float | int) -> float:
     if isinstance(val, (int, float)):
         return float(val)
     return float(str(val).replace(",", ".").strip())
 
 
 @bot.event
-async def on_raw_reaction_add(payload):
-    """Pauzeert meldingen voor een specifiek aandeel gedurende 3 uur als een gebruiker reageert op het bericht."""
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     if payload.user_id == bot.user.id:
         return
 
@@ -62,9 +58,14 @@ async def on_raw_reaction_add(payload):
             for ticker in alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]:
                 display_name = get_display_name(ticker)
                 if ticker in embed_text or display_name in embed_text:
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     if ticker not in alert_tracker:
-                        alert_tracker[ticker] = {"last_sent": datetime.min, "last_price": 0.0, "last_warning": "", "muted_until": datetime.min}
+                        alert_tracker[ticker] = {
+                            "last_sent": datetime.min.replace(tzinfo=timezone.utc), 
+                            "last_price": 0.0, 
+                            "last_warning": "", 
+                            "muted_until": datetime.min.replace(tzinfo=timezone.utc)
+                        }
                     
                     alert_tracker[ticker]["muted_until"] = now + timedelta(hours=3)
                     await channel.send(f"🔕 Alert voor **{display_name}** is gepauzeerd voor **3 uur** (reactie-stop actief).")
@@ -75,7 +76,7 @@ async def on_raw_reaction_add(payload):
 
 @bot.command(name="setalert")
 @commands.has_permissions(administrator=True)
-async def set_alert_threshold(ctx, percentage: str):
+async def set_alert_threshold(ctx: commands.Context, percentage: str) -> None:
     global SPIKE_THRESHOLD_PCT
     try:
         val = _parse_float(percentage)
@@ -96,7 +97,7 @@ async def set_alert_threshold(ctx, percentage: str):
 
 
 @set_alert_threshold.error
-async def set_alert_threshold_error(ctx, error):
+async def set_alert_threshold_error(ctx: commands.Context, error: Exception) -> None:
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("⚠️ Please specify a percentage. Example: `!setalert 1.5`")
     elif isinstance(error, commands.BadArgument):
@@ -104,7 +105,7 @@ async def set_alert_threshold_error(ctx, error):
 
 
 @bot.command(name="threshold")
-async def view_alert_threshold(ctx):
+async def view_alert_threshold(ctx: commands.Context) -> None:
     embed = discord.Embed(
         title="📊 Current Alert Settings",
         description=f"Spike Alert Threshold: **±{SPIKE_THRESHOLD_PCT}%**",
@@ -114,7 +115,7 @@ async def view_alert_threshold(ctx):
 
 
 @tasks.loop(minutes=1)
-async def minute_market_scanner():
+async def minute_market_scanner() -> None:
     try:
         if not LOG_CHANNEL_ID:
             return
@@ -132,12 +133,10 @@ async def minute_market_scanner():
 
         target_send_channel = alert_channel or log_channel
         watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
-        # Update historische resultaten van eerdere alerts
         await asyncio.to_thread(tracker.update_alert_outcomes)
 
-        # Haal direct de totale portfoliowaarde op voor de opgegeven gebruiker (bijv. "matice")
         try:
             tot_portfolio_val = await asyncio.to_thread(portfolio.get_portfolio_total, username)
         except Exception as e:
@@ -150,10 +149,9 @@ async def minute_market_scanner():
                 quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
                 price = quote["price"]
 
-                # 1. Price Spike Check
                 if ticker in last_prices:
                     prev_price = last_prices[ticker]
-                    spike_pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
+                    spike_pct = ((price - prev_price) / prev_price) * 100.0 if prev_price > 0 else 0.0
 
                     if abs(spike_pct) >= SPIKE_THRESHOLD_PCT:
                         diff_tag = "+" if spike_pct > 0 else "-"
@@ -185,33 +183,28 @@ async def minute_market_scanner():
 
                 last_prices[ticker] = price
 
-                # 2. Quant Early Warning & Sell/Buy Scan
                 res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker, tot_portfolio_val)
                 warnings = res.get("early_warnings", [])
                 action_text = res.get("action", "HOLD ⚖️")
 
-                # We sturen een alert als er early warnings zijn Óf als er een actief verkoopadvies (SELL) is gedetecteerd
                 should_trigger = bool(warnings) or "SELL" in action_text
 
                 if should_trigger:
                     if not warnings:
                         warnings = [f"Actief signaal gewijzigd naar {action_text}"]
 
-                    print(f"[SCAN LOG {now.strftime('%H:%M:%S')}] {ticker}: {action_text} | {warnings[0]}")
-
                     tracker_state = alert_tracker.get(ticker, {
-                        "last_sent": datetime.min,
+                        "last_sent": datetime.min.replace(tzinfo=timezone.utc),
                         "last_price": price,
                         "last_warning": "",
-                        "muted_until": datetime.min
+                        "muted_until": datetime.min.replace(tzinfo=timezone.utc)
                     })
 
                     time_since_last = now - tracker_state["last_sent"]
                     is_muted = now < tracker_state["muted_until"]
-                    price_diff_pct = abs((price - tracker_state["last_price"]) / tracker_state["last_price"] * 100) if tracker_state["last_price"] > 0 else 0.0
+                    price_diff_pct = abs((price - tracker_state["last_price"]) / tracker_state["last_price"] * 100.0) if tracker_state["last_price"] > 0 else 0.0
                     primary_warning = warnings[0] if warnings else ""
 
-                    # SLIMME ANTI-SPAM FILTER:
                     signal_changed = primary_warning != tracker_state["last_warning"] or "SELL" in action_text
                     time_window_passed = time_since_last >= timedelta(hours=2) and not is_muted
                     big_price_move = price_diff_pct >= 1.5
@@ -231,7 +224,7 @@ async def minute_market_scanner():
                         stop_loss_val = risk_data.get("stop_loss_price", 0.0)
 
                         warning_embed = discord.Embed(
-                            title=f"🚨 QUANT EARLY WARNING ALERT",
+                            title="🚨 QUANT EARLY WARNING ALERT",
                             description=(
                                 f"## {res['display_name']}\n"
                                 f"Marktpatroon gedetecteerd **vóór** de daadwerkelijke koersuitbraak!\n\n"
@@ -276,7 +269,7 @@ async def minute_market_scanner():
                             "last_sent": now,
                             "last_price": price,
                             "last_warning": primary_warning,
-                            "muted_until": tracker_state["muted_until"] if not big_price_move else datetime.min,
+                            "muted_until": tracker_state["muted_until"] if not big_price_move else datetime.min.replace(tzinfo=timezone.utc),
                         }
 
             except Exception as e:
@@ -287,12 +280,12 @@ async def minute_market_scanner():
 
 
 @minute_market_scanner.before_loop
-async def before_scanner():
+async def before_scanner() -> None:
     await bot.wait_until_ready()
 
 
 @bot.event
-async def on_ready():
+async def on_ready() -> None:
     bot_name = bot.user.name if bot.user else "StonksBot"
     bot_id = bot.user.id if bot.user else "0000"
     print(f"Logged in as {bot_name} ({bot_id})")
@@ -301,8 +294,7 @@ async def on_ready():
 
 
 @bot.command(name="accuracy")
-async def show_accuracy(ctx):
-    """Toont het historische zekerheidspercentage en de accuraatheid van de bot."""
+async def show_accuracy(ctx: commands.Context) -> None:
     async with ctx.typing():
         tracker.update_alert_outcomes()
         stats = tracker.get_accuracy_stats()
@@ -329,7 +321,7 @@ async def show_accuracy(ctx):
 
 
 @bot.command(name="help")
-async def help_cmd(ctx):
+async def help_cmd(ctx: commands.Context) -> None:
     embed = discord.Embed(
         title="📈 STOCKWATCHER COMMANDS",
         description="## Geünformeerd Handelsplatform & Risicobeheer",
@@ -380,12 +372,12 @@ async def help_cmd(ctx):
 
 
 @bot.command()
-async def ping(ctx):
+async def ping(ctx: commands.Context) -> None:
     await ctx.send("Pong! 🏓")
 
 
 @bot.command(name="connect")
-async def connect_account(ctx, username: str):
+async def connect_account(ctx: commands.Context, username: str) -> None:
     clean_username = username.strip().lower()
     portfolio.link_discord_account(str(ctx.author.id), clean_username)
     embed = discord.Embed(
@@ -397,7 +389,7 @@ async def connect_account(ctx, username: str):
 
 
 @bot.command(name="add")
-async def add_cmd(ctx, ticker: str, total_paid: str, buy_price: str):
+async def add_cmd(ctx: commands.Context, ticker: str, total_paid: str, buy_price: str) -> None:
     try:
         total_paid_num = _parse_float(total_paid)
         buy_price_num = _parse_float(buy_price)
@@ -426,7 +418,7 @@ async def add_cmd(ctx, ticker: str, total_paid: str, buy_price: str):
 
 
 @bot.command(name="remove")
-async def remove_cmd(ctx, ticker: str, shares: str = None):
+async def remove_cmd(ctx: commands.Context, ticker: str, shares: str = None) -> None:
     try:
         user_id = portfolio.resolve_user_id(str(ctx.author.id))
         shares_num = _parse_float(shares) if shares is not None else None
@@ -440,7 +432,7 @@ async def remove_cmd(ctx, ticker: str, shares: str = None):
 
 
 @bot.command(name="portfolio")
-async def show_portfolio(ctx):
+async def show_portfolio(ctx: commands.Context) -> None:
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     holdings = portfolio.get_portfolio(user_id)
     if not holdings:
@@ -482,7 +474,7 @@ async def show_portfolio(ctx):
         embed.add_field(name=field_title, value=field_body, inline=False)
 
     total_pl = total_val - total_cost
-    total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0.0
+    total_pl_pct = (total_pl / total_cost * 100.0) if total_cost > 0 else 0.0
     tot_diff = "+" if total_pl >= 0 else "-"
 
     summary_body = (
@@ -498,21 +490,21 @@ async def show_portfolio(ctx):
 
 
 @bot.command()
-async def watch(ctx, ticker: str):
+async def watch(ctx: commands.Context, ticker: str) -> None:
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     await asyncio.to_thread(alerts.add_watchlist, user_id, ticker)
     await ctx.send(f"✅ **{ticker.upper()}** toegevoegd aan watchlist.")
 
 
 @bot.command()
-async def unwatch(ctx, ticker: str):
+async def unwatch(ctx: commands.Context, ticker: str) -> None:
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     await asyncio.to_thread(alerts.remove_watchlist, user_id, ticker)
     await ctx.send(f"✅ **{ticker.upper()}** verwijderd uit watchlist.")
 
 
 @bot.command()
-async def watchlist(ctx):
+async def watchlist(ctx: commands.Context) -> None:
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     tickers = await asyncio.to_thread(alerts.get_watchlist, user_id)
     if not tickers:
@@ -522,7 +514,7 @@ async def watchlist(ctx):
 
 
 @bot.command(name="scan")
-async def scan_watchlist(ctx):
+async def scan_watchlist(ctx: commands.Context) -> None:
     user_id = portfolio.resolve_user_id(str(ctx.author.id))
     watchlist_items = alerts.get_watchlist(user_id)
     if not watchlist_items:
@@ -568,7 +560,7 @@ async def scan_watchlist(ctx):
 
 
 @bot.command(name="check")
-async def check_ticker(ctx, ticker: str):
+async def check_ticker(ctx: commands.Context, ticker: str) -> None:
     async with ctx.typing():
         try:
             res = signals.analyze_ticker(ticker)
@@ -609,13 +601,12 @@ async def check_ticker(ctx, ticker: str):
 
 
 @bot.command(name="kelly")
-async def kelly_cmd(ctx, win_rate: str, win_loss_ratio: str):
-    """Berekent de optimale positiegrootte via het Kelly-criterium."""
+async def kelly_cmd(ctx: commands.Context, win_rate: str, win_loss_ratio: str) -> None:
     try:
         w_rate = _parse_float(win_rate)
         wl_ratio = _parse_float(win_loss_ratio)
 
-        if w_rate > 1:
+        if w_rate > 1.0:
             w_rate = w_rate / 100.0
 
         fraction = quant.calculate_kelly_criterion(w_rate, wl_ratio)
@@ -631,7 +622,7 @@ async def kelly_cmd(ctx, win_rate: str, win_loss_ratio: str):
             name="📊 Invoerparameters & Uitkomst",
             value=(
                 f"```yaml\n"
-                f"Winstkans Schatting:  {w_rate * 100:.1f}%\n"
+                f"Winstkans Schatting:  {w_rate * 100.0:.1f}%\n"
                 f"Risk/Reward Ratio:   {wl_ratio:.2f}\n"
                 f"Kelly Fraction:      {fraction:.4f}\n"
                 f"Aanbevolen Positie:  {pct:.2f}%\n"
@@ -648,8 +639,7 @@ async def kelly_cmd(ctx, win_rate: str, win_loss_ratio: str):
 
 
 @bot.command(name="montecarlo")
-async def montecarlo_cmd(ctx, capital: str, daily_return_pct: str, volatility_pct: str, days: int = 252):
-    """Voert een Monte Carlo-simulatie uit op portfolio-ontwikkeling."""
+async def montecarlo_cmd(ctx: commands.Context, capital: str, daily_return_pct: str, volatility_pct: str, days: int = 252) -> None:
     async with ctx.typing():
         try:
             start_cap = _parse_float(capital)
@@ -685,7 +675,7 @@ async def montecarlo_cmd(ctx, capital: str, daily_return_pct: str, volatility_pc
 
 @bot.command(name="testalert")
 @commands.has_permissions(administrator=True)
-async def test_alert_cmd(ctx):
+async def test_alert_cmd(ctx: commands.Context) -> None:
     target_channel = (
         bot.get_channel(ALERT_CHANNEL_ID or LOG_CHANNEL_ID)
         if (ALERT_CHANNEL_ID or LOG_CHANNEL_ID)
@@ -762,7 +752,7 @@ class CLIContext:
         resolved_id = portfolio.resolve_user_id(user_id)
         self.author = type("User", (), {"id": resolved_id, "name": user_id})()
 
-    async def send(self, content=None, embed=None):
+    async def send(self, content: str = None, embed: discord.Embed = None) -> None:
         if content:
             print(f"🤖 {content}")
         if embed:
@@ -773,14 +763,13 @@ class CLIContext:
                 print(f"• {field.name}:\n  {field.value}")
             print("-" * 40)
 
-    def typing(self):
-        class DummyTyping:
-            async def __aenter__(self): pass
-            async def __aexit__(self, *args): pass
-        return DummyTyping()
+    @asynccontextmanager
+    async def typing(self) -> AsyncGenerator[None, None]:
+        # Cleanly yields an empty async context for CLI commands
+        yield
 
 
-async def execute_unified_command(user_id: str, command_line: str):
+async def execute_unified_command(user_id: str, command_line: str) -> None:
     cmd_line = command_line.strip()
     if not cmd_line.startswith("!"):
         cmd_line = "!" + cmd_line

@@ -14,19 +14,17 @@ def calculate_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     rs = avg_gain / avg_loss
-    out = 100.0 / (1 + rs)
+    out = 100.0 / (1.0 + rs)
     out = out.where(avg_loss != 0, 100.0)
     return out.where(~((avg_loss == 0) & (avg_gain == 0)), 50.0)
 
 
 def calculate_ema(close: pd.Series, period: int = 20) -> float:
-    """Berekent de Exponential Moving Average (EMA)."""
     ema_series = close.ewm(span=period, adjust=False).mean()
     return float(ema_series.iloc[-1])
 
 
 def calculate_stoch_rsi(close: pd.Series, rsi_period: int = 14, stoch_period: int = 14, k_period: int = 3, d_period: int = 3) -> dict:
-    """Berekent de Stochastic RSI (%K en %D)."""
     rsi = calculate_rsi(close, period=rsi_period)
     min_rsi = rsi.rolling(window=stoch_period).min()
     max_rsi = rsi.rolling(window=stoch_period).max()
@@ -34,7 +32,7 @@ def calculate_stoch_rsi(close: pd.Series, rsi_period: int = 14, stoch_period: in
     stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi)
     stoch_rsi = stoch_rsi.fillna(0.5)
 
-    k = stoch_rsi.rolling(window=k_period).mean() * 100
+    k = stoch_rsi.rolling(window=k_period).mean() * 100.0
     d = k.rolling(window=d_period).mean()
 
     k_val = float(k.iloc[-1])
@@ -91,48 +89,30 @@ def calculate_bollinger_bands(close: pd.Series, period: int = 20, std_dev: int =
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """
-    Berekent de Average True Range (ATR) op basis van de DataFrame.
-    Als kolommen ontbreken of de berekening faalt, wordt een dynamische 
-    volatiliteits-schatting gebruikt in plaats van een vast percentage.
-    """
     try:
         if df is None or df.empty or len(df) < period:
-            return 0.05
-            
-        # Zorg ervoor dat de kolommen lowercase zijn
-        cols = [c.lower() for c in df.columns]
-        df.columns = cols
+            return float(df["close"].iloc[-1] * 0.015) if (df is not None and not df.empty and "close" in df.columns) else 1.0
 
-        if "high" in df.columns and "low" in df.columns and "close" in df.columns:
-            high, low, close = df["high"], df["low"], df["close"]
-        elif "close" in df.columns:
-            # Fallback als high/low ontbreken: gebruik close als basis
-            close = df["close"]
-            high = close * 1.01
-            low = close * 0.99
-        else:
-            return 0.05
+        cols = {str(c).lower().strip() for c in df.columns}
+        high = df["high"] if "high" in df.columns else df["close"]
+        low = df["low"] if "low" in df.columns else df["close"]
+        close = df["close"]
 
         tr1 = high - low
         tr2 = (high - close.shift(1)).abs()
         tr3 = (low - close.shift(1)).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
         val = float(tr.rolling(window=period).mean().iloc[-1])
-        
+
         if not np.isnan(val) and val > 0:
             return val
-            
-        # Dynamisch alternatief op basis van standaarddeviatie i.p.v. hardcoded 1.5%
+
         returns_std = close.pct_change().std()
         if not np.isnan(returns_std) and returns_std > 0:
             return float(close.iloc[-1] * returns_std)
-            
+
         return float(close.iloc[-1] * 0.015)
-        
     except Exception:
-        # Absolute fallback bij een onverwachte fout
         return float(df["close"].iloc[-1] * 0.015) if (df is not None and not df.empty and "close" in df.columns) else 1.0
 
 
@@ -164,7 +144,7 @@ def calculate_obv(df: pd.DataFrame) -> dict:
     direction = np.where(close > close.shift(1), 1, np.where(close < close.shift(1), -1, 0))
     obv = (direction * volume).fillna(0).cumsum()
 
-    is_rising = bool(obv.iloc[-1] > obv.iloc[-5])
+    is_rising = bool(obv.iloc[-1] > obv.iloc[-5]) if len(obv) >= 5 else True
     trend = "rising" if is_rising else "falling"
 
     return {
@@ -174,13 +154,13 @@ def calculate_obv(df: pd.DataFrame) -> dict:
 
 
 def calculate_pivot_points(df: pd.DataFrame) -> dict:
-    prev_high = float(df["high"].iloc[-2])
-    prev_low = float(df["low"].iloc[-2])
-    prev_close = float(df["close"].iloc[-2])
+    prev_high = float(df["high"].iloc[-2]) if len(df) >= 2 else float(df["high"].iloc[-1])
+    prev_low = float(df["low"].iloc[-2]) if len(df) >= 2 else float(df["low"].iloc[-1])
+    prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else float(df["close"].iloc[-1])
 
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = (2 * pivot) - prev_low
-    s1 = (2 * pivot) - prev_high
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = (2.0 * pivot) - prev_low
+    s1 = (2.0 * pivot) - prev_high
 
     curr_close = float(df["close"].iloc[-1])
     if np.isnan(r1) or r1 <= curr_close:
@@ -222,19 +202,18 @@ def detect_early_warnings(df: pd.DataFrame, current_price: float) -> list:
     if pd.notna(curr_bw) and pd.notna(min_bw) and curr_bw <= min_bw:
         warnings.append("⚠️ **Bollinger Squeeze:** Volatiliteit is extreem laag. Een grote koersuitbraak staat op uitbreken!")
 
-    # 2. Strengere RSI-drempels voor de lange termijn (minder gevoelig / minder valse signalen)
+    # 2. RSI Early Warnings
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14, min_periods=5).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=5).mean()
     rs = gain / (loss.replace(0, 1e-9))
-    rsi = 100.0 / (1 + rs)
+    rsi = 100.0 / (1.0 + rs)
     current_rsi = rsi.iloc[-1] if not rsi.empty else 50.0
 
-    # Aangepast naar extremere waardes zodat de bot rustiger reageert voor de lange termijn
     if current_rsi <= 28:
-        warnings.append(f"⚠️ **Strong Pre-Buy Warning:** RSI is diep oversold ({current_rsi:.1f}). Sterk bodemsignaal!")
+        warnings.append(f"⚠️ **Pre-Buy Warning:** RSI is diep oversold ({current_rsi:.1f}). Mogelijk bodemsignaal nabij!")
     elif current_rsi >= 72:
-        warnings.append(f"⚠️ **Strong Pre-Sell Warning:** RSI is diep overbought ({current_rsi:.1f}). Sterk topsignaal!")
+        warnings.append(f"⚠️ **Pre-Sell Warning:** RSI is diep overbought ({current_rsi:.1f}). Mogelijk top bereikt!")
 
     # 3. Near Resistance / Support Breakout
     recent_high = high.tail(20).max()
@@ -306,7 +285,6 @@ def analyze_ticker(ticker: str) -> dict:
         bullish_signals = 0
         bearish_signals = 0
 
-        # 1. EMA 20 Trend
         if price > ema20:
             bullish_signals += 1
             reasons.append(f"Price > EMA20 (€{ema20:.2f})")
@@ -314,7 +292,6 @@ def analyze_ticker(ticker: str) -> dict:
             bearish_signals += 1
             reasons.append(f"Price < EMA20 (€{ema20:.2f})")
 
-        # 2. RSI Condition
         if current_rsi < 30:
             bullish_signals += 2
             reasons.append(f"RSI Oversold ({current_rsi:.1f})")
@@ -322,7 +299,6 @@ def analyze_ticker(ticker: str) -> dict:
             bearish_signals += 2
             reasons.append(f"RSI Overbought ({current_rsi:.1f})")
 
-        # 3. Stochastic RSI Condition
         if stoch_rsi["status"] == "oversold":
             bullish_signals += 1
             reasons.append(f"Stoch RSI Oversold (%K: {stoch_rsi['k']:.1f})")
@@ -330,7 +306,6 @@ def analyze_ticker(ticker: str) -> dict:
             bearish_signals += 1
             reasons.append(f"Stoch RSI Overbought (%K: {stoch_rsi['k']:.1f})")
 
-        # 4. MACD Cross
         if macd["cross"] == "bullish":
             bullish_signals += 1
             reasons.append("MACD Bullish Cross")
@@ -338,7 +313,6 @@ def analyze_ticker(ticker: str) -> dict:
             bearish_signals += 1
             reasons.append("MACD Bearish Cross")
 
-        # 5. Bollinger Bands
         if price <= bb["lower"]:
             bullish_signals += 1
             reasons.append("Price at Lower Bollinger Band")
@@ -346,7 +320,6 @@ def analyze_ticker(ticker: str) -> dict:
             bearish_signals += 1
             reasons.append("Price at Upper Bollinger Band")
 
-        # Verdict Calculation
         if bullish_signals > bearish_signals + 1:
             verdict = "BULLISH 🚀"
         elif bearish_signals > bullish_signals + 1:
@@ -401,32 +374,28 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 150.37) 
     if np.isnan(s1) or s1 >= price:
         s1 = price * 0.98
 
-    # 1. Dynamische Risk/Reward Ratio (RRR) met asymmetrische fallback
     risk_dist = max(0.01, price - s1)
     reward_dist = max(0.01, r1 - price)
-    
-    # Als de fallback actief is (risico en beloning gelijk), zorgen we voor unieke variatie per aandeel
+
     if abs(risk_dist - reward_dist) < 0.001:
         raw_rrr = 1.35 + (hash(ticker) % 15) / 10.0
     else:
         raw_rrr = float(reward_dist / risk_dist) if risk_dist > 0 else 1.50
-    
+
     dynamic_rrr = round(max(1.10, min(3.50, raw_rrr)), 2)
     if np.isnan(dynamic_rrr):
         dynamic_rrr = 1.50
 
-    # Bepaal Actie Advies
     action = "HOLD ⚖️"
     if any("Pre-Buy" in w or "Testing Resistance" in w or "Bollinger Squeeze" in w for w in early_warnings):
         action = "BUY 🟢 (Koopsignaal / Bodem inzicht)"
     elif any("Pre-Sell" in w or "Testing Support" in w for w in early_warnings):
         action = "SELL 🔴 (Verkoopsignaal / Top inzicht)"
 
-    # 2. Unieke Winstkans Schatting per aandeel op basis van RSI en indicatoren
     current_rsi = base_analysis.get("rsi", 50.0)
     rsi_factor = 50.0 + abs(current_rsi - 50.0) * 0.3
     win_rate = float(np.clip(rsi_factor, 52.0, 78.0))
-    
+
     risk_reward_ratio = dynamic_rrr
     try:
         kelly_fraction = quant.calculate_kelly_criterion(win_rate / 100.0, risk_reward_ratio)
@@ -437,10 +406,8 @@ def analyze_ticker_advanced(ticker: str, portfolio_total_value: float = 150.37) 
     kelly_eur = portfolio_total_value * kelly_fraction
     kelly_shares = (kelly_eur / price) if price > 0 else 0.4030
 
-    # 4. Harde 1%-Risicoregel op basis van ATR Stop-Loss
     risk_rule_1pct = quant.calculate_1pct_risk_position(portfolio_total_value, price, atr, risk_pct=0.01)
 
-    # 5. Expected Shortfall (Tail Risk)
     daily_returns = df["close"].pct_change().dropna().tolist() if "close" in df.columns and not df.empty else []
     cvar_95 = quant.calculate_expected_shortfall(daily_returns, confidence_level=0.95) * 100.0
     if np.isnan(cvar_95):

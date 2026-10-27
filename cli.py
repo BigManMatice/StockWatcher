@@ -1,4 +1,3 @@
-# cli.py
 import argparse
 import asyncio
 import io
@@ -20,7 +19,7 @@ import portfolio
 import signals
 from stockName import get_display_name
 
-CACHE_FILE = config.BASE_DIR / "active_user.txt"
+CACHE_FILE: Path = config.BASE_DIR / "active_user.txt"
 
 
 def get_cached_user() -> str:
@@ -182,7 +181,7 @@ class DashboardApp(App):
 
         self.query_one("#watchlist", Static).update("\n".join(lines))
 
-    def run_async_command(self, cmd_text: str):
+    def run_async_command(self, cmd_text: str) -> None:
         coro = bot.execute_unified_command(self.active_user_id, cmd_text)
         try:
             running_loop = asyncio.get_running_loop()
@@ -216,7 +215,8 @@ class DashboardApp(App):
             self.run_async_command(cmd_text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn_set_threshold":
+        btn_id = event.button.id
+        if btn_id == "btn_set_threshold":
             val_str = self.query_one("#input_threshold", Input).value
             try:
                 val = float(val_str)
@@ -229,27 +229,27 @@ class DashboardApp(App):
             except ValueError:
                 print("⚠️ Invalid number format.")
 
-        elif event.button.id == "btn_run_cmd":
+        elif btn_id == "btn_run_cmd":
             cmd_input = self.query_one("#input_cmd", Input)
             self.execute_custom_command(cmd_input.value)
             cmd_input.value = ""
 
-        elif event.button.id == "btn_portfolio":
+        elif btn_id == "btn_portfolio":
             self.execute_custom_command("!portfolio")
 
-        elif event.button.id == "btn_scan":
+        elif btn_id == "btn_scan":
             self.execute_custom_command("!scan")
 
-        elif event.button.id == "btn_refresh":
+        elif btn_id == "btn_refresh":
             print("🔄 Refreshing display...")
             self.update_watchlist_view()
             self.update_status_view()
 
-        elif event.button.id == "btn_exit":
+        elif btn_id == "btn_exit":
             self.exit()
 
 
-def start_bot_background():
+def start_bot_background() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -258,7 +258,7 @@ def start_bot_background():
         print(f"❌ Discord Bot Connection Error: {e}")
 
 
-def main_cli():
+def main_cli() -> None:
     parser = argparse.ArgumentParser(description="StonksBot Terminal Dashboard")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -275,7 +275,10 @@ def main_cli():
         app.run()
 
     elif args.command == "cli-only":
-        import main
+        try:
+            import main
+        except ImportError:
+            print("⚠️ 'main' module not found for cli-only execution.")
 
 
 if __name__ == "__main__":
