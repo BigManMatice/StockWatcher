@@ -222,7 +222,7 @@ def detect_early_warnings(df: pd.DataFrame, current_price: float) -> list:
     if pd.notna(curr_bw) and pd.notna(min_bw) and curr_bw <= min_bw:
         warnings.append("⚠️ **Bollinger Squeeze:** Volatiliteit is extreem laag. Een grote koersuitbraak staat op uitbreken!")
 
-    # 2. RSI Divergentie / Approaching Oversold/Overbought
+    # 2. Strengere RSI-drempels voor de lange termijn (minder gevoelig / minder valse signalen)
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14, min_periods=5).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=5).mean()
@@ -230,10 +230,11 @@ def detect_early_warnings(df: pd.DataFrame, current_price: float) -> list:
     rsi = 100.0 / (1 + rs)
     current_rsi = rsi.iloc[-1] if not rsi.empty else 50.0
 
-    if 30 <= current_rsi <= 35:
-        warnings.append(f"⚠️ **Pre-Buy Warning:** RSI is bijna oversold ({current_rsi:.1f}). Mogelijk bodemsignaal nabij!")
-    elif 65 <= current_rsi <= 70:
-        warnings.append(f"⚠️ **Pre-Sell Warning:** RSI is bijna overbought ({current_rsi:.1f}). Mogelijk top bereikt!")
+    # Aangepast naar extremere waardes zodat de bot rustiger reageert voor de lange termijn
+    if current_rsi <= 28:
+        warnings.append(f"⚠️ **Strong Pre-Buy Warning:** RSI is diep oversold ({current_rsi:.1f}). Sterk bodemsignaal!")
+    elif current_rsi >= 72:
+        warnings.append(f"⚠️ **Strong Pre-Sell Warning:** RSI is diep overbought ({current_rsi:.1f}). Sterk topsignaal!")
 
     # 3. Near Resistance / Support Breakout
     recent_high = high.tail(20).max()
