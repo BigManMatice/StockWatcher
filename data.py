@@ -277,3 +277,64 @@ def get_daily(ticker: str) -> pd.DataFrame:
                 df[col] = df[col] * eur_rate
 
     return df
+
+
+def refresh_daily(ticker: str) -> pd.DataFrame:
+    """Force-refresh daily OHLCV history from Yahoo Finance."""
+    ticker = ticker.upper().strip()
+    api_ticker = get_mapped_ticker(ticker)
+
+    history = yf.Ticker(api_ticker).history(
+        period="1y",
+        interval="1d",
+        auto_adjust=True,
+        repair=True,
+        timeout=15,
+    )
+
+    if history.empty:
+        raise DataError(f"No fresh daily history available for {ticker}")
+
+    history.columns = [str(column).lower() for column in history.columns]
+    history.index = pd.to_datetime(history.index).date
+
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(history.columns):
+        raise DataError(f"Incomplete OHLCV data for {ticker}")
+
+    history = history.dropna(subset=["open", "high", "low", "close"])
+    history = history[~history.index.duplicated(keep="last")]
+
+    if history.empty:
+        raise DataError(f"No valid daily candles available for {ticker}")
+
+    with _connect() as conn:
+        for day, row in history.iterrows():
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO prices
+                    (ticker, date, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ticker,
+                    day.isoformat(),
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    int(row["volume"]),
+                ),
+            )
+
+    # Use the same currency normalization as get_daily().
+    is_european = api_ticker.endswith(
+        (".DE", ".LS", ".AS", ".L", ".PA", ".MI")
+    )
+
+    if not is_european:
+        rate = get_usd_eur()
+        for column in ("open", "high", "low", "close"):
+            history[column] = history[column] * rate
+
+    return history

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, AsyncGenerator
 import discord
 from discord.ext import commands, tasks
-
+import sqlite3
 import alerts
 import config
 import data
@@ -214,7 +214,7 @@ async def minute_market_scanner() -> None:
                     if should_send_alert:
                         embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
 
-                        await asyncio.to_thread(tracker.log_alert, ticker, primary_warning, action_text, price)
+                        await asyncio.to_thread(tracker.log_alert,ticker,primary_warning,action_text,price,res.get("atr"),)
                         hist_stats = await asyncio.to_thread(tracker.get_accuracy_stats, primary_warning)
 
                         risk_data = res.get("risk_rule_1pct", {})
@@ -250,9 +250,15 @@ async def minute_market_scanner() -> None:
                             ),
                             inline=False,
                         )
+                        accuracy_pct = hist_stats.get("accuracy_pct")
+                        accuracy_text = f"{accuracy_pct:.1f}%" if accuracy_pct is not None else "N/A"
+
                         warning_embed.add_field(
                             name="📊 Model Zekerheid (Historische Data)",
-                            value=f"• **Historische Precisie:** `{hist_stats['accuracy_pct']:.1f}%` ({hist_stats['wins']}/{hist_stats['total']} winstgevend voorspeld)",
+                            value=(
+                                f"• **Historische Precisie:** `{accuracy_text}` "
+                                f"({hist_stats['wins']}/{hist_stats['total']} winstgevend voorspeld)"
+                            ),
                             inline=False,
                         )
                         warning_embed.add_field(
@@ -293,31 +299,102 @@ async def on_ready() -> None:
         minute_market_scanner.start()
 
 
+
 @bot.command(name="accuracy")
 async def show_accuracy(ctx: commands.Context) -> None:
     async with ctx.typing():
-        tracker.update_alert_outcomes()
-        stats = tracker.get_accuracy_stats()
+        await asyncio.to_thread(tracker.update_alert_outcomes)
+
+        stats_1d = await asyncio.to_thread(
+            tracker.get_accuracy_stats, None, "1d"
+        )
+        stats_3d = await asyncio.to_thread(
+            tracker.get_accuracy_stats, None, "3d"
+        )
+        stats_7d = await asyncio.to_thread(
+            tracker.get_accuracy_stats, None, "7d"
+        )
+
+        with sqlite3.connect(tracker.DB_FILE) as conn:
+            total_alerts = conn.execute(
+                "SELECT COUNT(*) FROM alert_history"
+            ).fetchone()[0]
+
+            pending = conn.execute("""
+                SELECT
+                    SUM(CASE WHEN is_winner_1d IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN is_winner_3d IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN is_winner_7d IS NULL THEN 1 ELSE 0 END)
+                FROM alert_history
+            """).fetchone()
+
+        def format_stats(stats):
+            accuracy = (
+                f"{stats['accuracy_pct']:.1f}%"
+                if stats["accuracy_pct"] is not None
+                else "N/A"
+            )
+            return (
+                f"Precisie: **{accuracy}**\n"
+                f"Correct: **{stats['wins']}/{stats['total']}**\n"
+            )
 
         embed = discord.Embed(
             title="🎯 BOT SIGNALS ACCURACY TRACKER",
-            description="## Historische Betrouwbaarheid & Performance Tracker\nResultaten van uitgezonden alerts vergeleken met marktkoersen.",
+            description=(
+                "## Historische Betrouwbaarheid & Performance Tracker\n"
+                "Gemeten resultaten van uitgezonden alerts, "
+                "vergeleken met historische marktkoersen.\n\n"
+                f"**Totaal geregistreerde alerts:** {total_alerts}"
+            ),
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
+
         embed.add_field(
-            name="📊 Totale Model Statistieken",
+            name="📅 1-daagse evaluatie",
             value=(
-                f"```yaml\n"
-                f"Zekerheidspercentage: {stats['accuracy_pct']:.1f}%\n"
-                f"Totaal Geëvalueerd:    {stats['total']} alerts\n"
-                f"Winstgevende Signals: {stats['wins']} keer correct\n"
-                f"```"
+                format_stats(stats_1d)
+                + f"Nog niet geëvalueerd: **{pending[0] or 0}**"
+            ),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="📅 3-daagse evaluatie",
+            value=(
+                format_stats(stats_3d)
+                + f"Nog niet geëvalueerd: **{pending[1] or 0}**"
+            ),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="📅 7-daagse evaluatie",
+            value=(
+                format_stats(stats_7d)
+                + f"Nog niet geëvalueerd: **{pending[2] or 0}**"
+            ),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="ℹ️ Evaluatiemethode",
+            value=(
+                "• BUY: koersstijging van minimaal 1 ATR.\n"
+                "• SELL: koersdaling van minimaal 1 ATR.\n"
+                "• ATR wordt vastgelegd op het moment van de alert.\n"
+                "• Elk tijdsvenster wordt afzonderlijk beoordeeld.\n"
+                "• N/A betekent dat er nog geen beoordeelde alerts zijn."
             ),
             inline=False,
         )
-        embed.set_footer(text="StockWatcher Quantitative Validation Engine")
+
+        embed.set_footer(
+            text="StockWatcher Quantitative Validation Engine"
+        )
         await ctx.send(embed=embed)
+
 
 
 @bot.command(name="help")
