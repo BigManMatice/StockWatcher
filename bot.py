@@ -16,6 +16,8 @@ from stockName import get_display_name
 
 # Cooldown & state tracking: { ticker: { "last_sent": datetime, "last_price": float, "last_warning": str, "muted_until": datetime } }
 alert_tracker = {}
+# Stel hier de gewenste gebruiker in (bijv. de custom_username uit je variabele)
+username = "matice" # Of "default_user"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -135,8 +137,27 @@ async def minute_market_scanner():
         # Update historische resultaten van eerdere alerts
         await asyncio.to_thread(tracker.update_alert_outcomes)
 
-        holdings = portfolio.get_portfolio("default_user")
-        tot_portfolio_val = sum(h.get("value", h["shares"] * h["buy_price"]) for h in holdings) if holdings else 150.37
+        # Haal direct de totale portfoliowaarde op voor deze ene gebruiker via de nieuwe functie
+        tot_portfolio_val = portfolio.get_portfolio_total(username)
+        try:
+            total_sum = 0.0
+            with closing(data._connect()) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT user_id FROM holdings")
+                users = cursor.fetchall()
+                
+                for u in users:
+                    uid = u[0]
+                    holdings_list = portfolio.get_portfolio(uid)
+                    for h in holdings_list:
+                        shares = h.get("shares", 0.0)
+                        curr_p = h.get("price", h.get("buy_price", 0.0)) or h.get("buy_price", 0.0)
+                        total_sum += shares * curr_p
+
+            if total_sum > 0:
+                tot_portfolio_val = total_sum
+        except Exception as e:
+            print(f"[Multi-User Portfolio Error]: {e}")
 
         for ticker in watchlist_items:
             display_name = get_display_name(ticker)
@@ -179,12 +200,19 @@ async def minute_market_scanner():
 
                 last_prices[ticker] = price
 
-                # 2. Quant Early Warning Scan
+                # 2. Quant Early Warning & Sell/Buy Scan
                 res = await asyncio.to_thread(signals.analyze_ticker_advanced, ticker, tot_portfolio_val)
                 warnings = res.get("early_warnings", [])
+                action_text = res.get("action", "HOLD ⚖️")
 
-                if warnings:
-                    print(f"[SCAN LOG {now.strftime('%H:%M:%S')}] {ticker}: {res.get('action', 'HOLD')} | {warnings[0]}")
+                # We sturen een alert als er early warnings zijn Óf als er een actief verkoopadvies (SELL) is gedetecteerd
+                should_trigger = bool(warnings) or "SELL" in action_text
+
+                if should_trigger:
+                    if not warnings:
+                        warnings = [f"Actief signaal gewijzigd naar {action_text}"]
+
+                    print(f"[SCAN LOG {now.strftime('%H:%M:%S')}] {ticker}: {action_text} | {warnings[0]}")
 
                     tracker_state = alert_tracker.get(ticker, {
                         "last_sent": datetime.min,
@@ -200,14 +228,13 @@ async def minute_market_scanner():
 
                     # SLIMME ANTI-SPAM FILTER:
                     # Stuur alleen als het signaal veranderd is, de koers >= 1.5% beweegt, of er minstens 2 uur verstreken zijn (en niet gemuted).
-                    signal_changed = primary_warning != tracker_state["last_warning"]
+                    signal_changed = primary_warning != tracker_state["last_warning"] or "SELL" in action_text
                     time_window_passed = time_since_last >= timedelta(hours=2) and not is_muted
                     big_price_move = price_diff_pct >= 1.5
 
                     should_send_alert = signal_changed or big_price_move or time_window_passed
 
                     if should_send_alert:
-                        action_text = res.get("action", "HOLD ⚖️")
                         embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
 
                         await asyncio.to_thread(tracker.log_alert, ticker, primary_warning, action_text, price)

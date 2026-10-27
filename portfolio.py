@@ -109,6 +109,15 @@ def remove_holding(user_identifier: str, ticker: str, shares: float = None) -> b
     return True
 
 
+def get_portfolio_total(user_identifier: str = "default_user") -> float:
+    """
+    Berekent de totale actuele waarde van het portfolio voor één specifieke gebruiker.
+    Accepteert een custom_username of Discord ID (via resolve_user_id).
+    """
+    portfolio_items = get_portfolio(user_identifier)
+    total_value = sum(item.get("value", 0.0) for item in portfolio_items)
+    return round(total_value, 2)
+
 def get_portfolio(user_identifier: str) -> list:
     data.init_db()
     user_id = resolve_user_id(user_identifier)
