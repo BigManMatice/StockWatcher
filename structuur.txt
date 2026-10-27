@@ -1,0 +1,75 @@
+Folder PATH listing for volume Windows
+Volume serial number is D434-A8B4
+C:.
+|   .coverage
+|   .env
+|   .gitignore
+|   active_user.txt
+|   alerts.py
+|   alerts_history.db
+|   bot.py
+|   bot_database.db
+|   cli.py
+|   config.py
+|   data.py
+|   main.py
+|   plan.md
+|   portfolio.py
+|   pytest.ini
+|   quant.py
+|   README.md
+|   requirements.txt
+|   run.bat
+|   run.sh
+|   signals.py
+|   stockName.py
+|   stockwatcher.db
+|   stockwatcher.log
+|   stockWatcherFiles.zip
+|   structuur.txt
+|   tracker.py
+|   
+|       
++---tests
+|   |   test_alerts.py
+|   |   test_bot.py
+|   |   test_cli.py
+|   |   test_data.py
+|   |   test_portfolio.py
+|   |   test_quant.py
+|   |   test_signals.py
+|   |   test_signals_early_warning.py
+|   |   test_stockName.py
+|   |   
+|   \---__pycache__
+|           test_alerts.cpython-313-pytest-9.1.1.pyc
+|           test_bot.cpython-313-pytest-9.1.1.pyc
+|           test_cli.cpython-313-pytest-9.1.1.pyc
+|           test_data.cpython-313-pytest-9.1.1.pyc
+|           test_portfolio.cpython-313-pytest-9.1.1.pyc
+|           test_quant.cpython-313-pytest-9.1.1.pyc
+|           test_signals.cpython-313-pytest-9.1.1.pyc
+|           test_signals_early_warning.cpython-313-pytest-9.1.1.pyc
+|           test_stockName.cpython-313-pytest-9.1.1.pyc
+|           
+\---__pycache__
+        alerts.cpython-313.pyc
+        alerts.cpython-314.pyc
+        bot.cpython-313.pyc
+        bot.cpython-314.pyc
+        cli.cpython-313.pyc
+        config.cpython-313.pyc
+        config.cpython-314.pyc
+        data.cpython-313.pyc
+        data.cpython-314.pyc
+        main.cpython-313.pyc
+        portfolio.cpython-313.pyc
+        portfolio.cpython-314.pyc
+        quant.cpython-313.pyc
+        signals.cpython-313.pyc
+        signals.cpython-314.pyc
+        stockName.cpython-313.pyc
+        stockName.cpython-314.pyc
+        test_codebase.cpython-313-pytest-9.1.1.pyc
+        tracker.cpython-313.pyc
+        

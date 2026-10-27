@@ -113,6 +113,48 @@ async def view_alert_threshold(ctx: commands.Context) -> None:
     )
     await ctx.send(embed=embed)
 
+@tasks.loop(minutes=10)
+async def watchlist_live_status_loop() -> None:
+    try:
+        if not LOG_CHANNEL_ID:
+            return
+
+        log_channel = bot.get_channel(LOG_CHANNEL_ID) or await bot.fetch_channel(LOG_CHANNEL_ID)
+        if not log_channel:
+            return
+
+        watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
+        
+        status_lines = []
+        for ticker in watchlist_items:
+            display_name = get_display_name(ticker)
+            try:
+                quote = await asyncio.to_thread(data.get_finnhub_quote, ticker)
+                price = quote["price"]
+                pct = quote.get("pct_change", 0.0)
+                
+                circle = "🟢" if pct >= 0 else "🔴"
+                diff_sym = "+" if pct >= 0 else ""
+                
+                status_lines.append(f"{circle} **{display_name}** ({ticker})\n€{price:.2f} · (`{diff_sym}{pct:.2f}%`)")
+            except Exception as e:
+                status_lines.append(f"⚪ **{display_name}** ({ticker})\n*Kon koers niet ophalen*")
+
+        embed = discord.Embed(
+            title="📈 Watchlist Live Status",
+            description="\n\n".join(status_lines),
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text="StockWatcher Periodic Live Status")
+        
+        await log_channel.send(embed=embed)
+    except Exception as e:
+        print(f"[Watchlist Status Loop Error]: {e}")
+
+@watchlist_live_status_loop.before_loop
+async def before_watchlist_status() -> None:
+    await bot.wait_until_ready()
 
 @tasks.loop(minutes=1)
 async def minute_market_scanner() -> None:
@@ -297,6 +339,8 @@ async def on_ready() -> None:
     print(f"Logged in as {bot_name} ({bot_id})")
     if not minute_market_scanner.is_running():
         minute_market_scanner.start()
+    if not watchlist_live_status_loop.is_running():
+        watchlist_live_status_loop.start()
 
 
 
