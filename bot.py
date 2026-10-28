@@ -33,6 +33,114 @@ if ALERT_CHANNEL_ID:
 SPIKE_THRESHOLD_PCT: float = 2.0
 last_prices: Dict[str, float] = {}
 
+class TradeModal(discord.ui.Modal, title="Positie Invoeren"):
+    shares_input = discord.ui.TextInput(
+        label="Aantal stuks",
+        placeholder="bijv. 0.10 of 1 (laat leeg als je EUR invult)",
+        required=False,
+    )
+    amount_input = discord.ui.TextInput(
+        label="Totaalbedrag in EUR",
+        placeholder="bijv. 25 of 50 (laat leeg als je stuks invult)",
+        required=False,
+    )
+
+    def __init__(self, ticker: str, price: float, stop_loss: float, suggested_shares: float):
+        super().__init__()
+        self.ticker = ticker
+        self.price = price
+        self.stop_loss = stop_loss
+        self.suggested_shares = suggested_shares
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        
+        try:
+            shares = 0.0
+            if self.shares_input.value.strip():
+                shares = _parse_float(self.shares_input.value)
+            elif self.amount_input.value.strip():
+                total_eur = _parse_float(self.amount_input.value)
+                shares = total_eur / self.price if self.price > 0 else 0.0
+            else:
+                shares = self.suggested_shares
+
+            if shares <= 0:
+                await interaction.response.send_message("⚠️ Aantal stuks moet groter zijn dan 0.", ephemeral=True)
+                return
+
+            total_cost = shares * self.price
+
+            # Sla op in portfolio en actieve trades
+            portfolio.add_holding(user_id, self.ticker, total_cost, self.price)
+            
+            with tracker._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO active_trades (user_id, ticker, shares, entry_price, stop_loss, peak_price, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
+                    """,
+                    (user_id, self.ticker, shares, self.price, self.stop_loss, self.price)
+                )
+                conn.commit()
+
+            await interaction.response.send_message(
+                f"✅ Aangepaste positie geregistreerd voor **{self.ticker}**!\n"
+                f"• Aantal stuks: `{shares:.4f}`\n"
+                f"• Totale waarde: `€ {total_cost:.2f}`\n"
+                f"• Stop-Loss ingesteld op: `€ {self.stop_loss:.2f}`\n\n"
+                f"De bot volgt je positie nu live!",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ Fout bij verwerken van positie: {e}", ephemeral=True)
+
+
+class TradeActionView(discord.ui.View):
+    def __init__(self, ticker: str, action_text: str, suggested_shares: float, price: float, stop_loss: float):
+        super().__init__(timeout=None)
+        self.ticker = ticker
+        self.action_text = action_text
+        self.suggested_shares = suggested_shares
+        self.price = price
+        self.stop_loss = stop_loss
+
+    @discord.ui.button(label="✏️ Zelf Aantal/Bedrag Ingeven", style=discord.ButtonStyle.primary)
+    async def custom_trade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = TradeModal(
+            ticker=self.ticker,
+            price=self.price,
+            stop_loss=self.stop_loss,
+            suggested_shares=self.suggested_shares
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="🚀 Koop Max Voorgesteld", style=discord.ButtonStyle.secondary)
+    async def follow_trade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        try:
+            total_cost = self.suggested_shares * self.price
+            portfolio.add_holding(user_id, self.ticker, total_cost, self.price)
+            
+            with tracker._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO active_trades (user_id, ticker, shares, entry_price, stop_loss, peak_price, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
+                    """,
+                    (user_id, self.ticker, self.suggested_shares, self.price, self.stop_loss, self.price)
+                )
+                conn.commit()
+            
+            await interaction.response.send_message(
+                f"✅ Max positie geregistreerd voor **{self.ticker}**!\n"
+                f"• Aantal stuks: `{self.suggested_shares:.4f}`\n"
+                f"• Totale waarde: `€ {total_cost:.2f}`\n"
+                f"• Stop-Loss ingesteld op: `€ {self.stop_loss:.2f}`",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ Fout bij opslaan van positie: {e}", ephemeral=True)
 
 def _parse_float(val: str | float | int) -> float:
     if isinstance(val, (int, float)):
@@ -113,6 +221,7 @@ async def view_alert_threshold(ctx: commands.Context) -> None:
     )
     await ctx.send(embed=embed)
 
+
 @tasks.loop(minutes=10)
 async def watchlist_live_status_loop() -> None:
     try:
@@ -152,9 +261,11 @@ async def watchlist_live_status_loop() -> None:
     except Exception as e:
         print(f"[Watchlist Status Loop Error]: {e}")
 
+
 @watchlist_live_status_loop.before_loop
 async def before_watchlist_status() -> None:
     await bot.wait_until_ready()
+
 
 @tasks.loop(minutes=1)
 async def minute_market_scanner() -> None:
@@ -174,6 +285,20 @@ async def minute_market_scanner() -> None:
                 print(f"[Alert Warning] Could not find alert channel: {e}")
 
         target_send_channel = alert_channel or log_channel
+
+        # Controleer actieve trades op Stop-Loss of Winst-doel
+        trade_alerts = await asyncio.to_thread(tracker.monitor_active_trades)
+        for alert in trade_alerts:
+            if target_send_channel:
+                embed = discord.Embed(
+                    title="⚠️ POSITIE BEHEER ALERT",
+                    description=alert["message"],
+                    color=discord.Color.red() if alert["type"] == "STOP_LOSS" else discord.Color.gold(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.set_footer(text="StockWatcher Risk Engine • Automated Exit Monitor")
+                await target_send_channel.send(embed=embed)
+
         watchlist_items = alerts.get_all_global_watchlists() or ["APC.DE", "MSF.DE", "VWCE.DE", "2B76.DE", "EUNK.DE"]
         now = datetime.now(timezone.utc)
 
@@ -206,7 +331,7 @@ async def minute_market_scanner() -> None:
                                 f"De koers stijgt/daalt krachtig buiten de ingestelde drempelwaarde!\n\n"
                                 f"```diff\n"
                                 f"{diff_tag} Verandering: {spike_pct:+.2f}%\n"
-                                f"{diff_tag} Oude Koers:  € {prev_price:.2f}\n"
+                                f"{diff_tag} Oude Koers:   € {prev_price:.2f}\n"
                                 f"{diff_tag} Nieuwe Koers: € {price:.2f}\n"
                                 f"```"
                             ),
@@ -256,7 +381,7 @@ async def minute_market_scanner() -> None:
                     if should_send_alert:
                         embed_color = discord.Color.green() if "BUY" in action_text else (discord.Color.red() if "SELL" in action_text else discord.Color.gold())
 
-                        await asyncio.to_thread(tracker.log_alert,ticker,primary_warning,action_text,price,res.get("atr"),)
+                        await asyncio.to_thread(tracker.log_alert, ticker, primary_warning, action_text, price, res.get("atr"))
                         hist_stats = await asyncio.to_thread(tracker.get_accuracy_stats, primary_warning)
 
                         risk_data = res.get("risk_rule_1pct", {})
@@ -308,10 +433,21 @@ async def minute_market_scanner() -> None:
                             value=f"### **{action_text}**",
                             inline=False,
                         )
+                        
                         warning_embed.set_footer(text="Reageer met een emoji op dit bericht om alerts voor 3 uur te pauzeren • StockWatcher Engine")
 
+                        # Maak de interactieve knoppen-view aan
+                        view = TradeActionView(
+                            ticker=ticker,
+                            action_text=action_text,
+                            suggested_shares=max_shares_val,
+                            price=price,
+                            stop_loss=stop_loss_val
+                        )
+
                         if target_send_channel:
-                            await target_send_channel.send(embed=warning_embed)
+                            # Stuur de embed mét de interactieve knop mee
+                            await target_send_channel.send(embed=warning_embed, view=view)
 
                         alert_tracker[ticker] = {
                             "last_sent": now,
@@ -341,7 +477,6 @@ async def on_ready() -> None:
         minute_market_scanner.start()
     if not watchlist_live_status_loop.is_running():
         watchlist_live_status_loop.start()
-
 
 
 @bot.command(name="accuracy")
@@ -438,7 +573,6 @@ async def show_accuracy(ctx: commands.Context) -> None:
             text="StockWatcher Quantitative Validation Engine"
         )
         await ctx.send(embed=embed)
-
 
 
 @bot.command(name="help")
@@ -814,7 +948,7 @@ async def test_alert_cmd(ctx: commands.Context) -> None:
             "De koers stijgt krachtig buiten de ingestelde drempelwaarde!\n\n"
             "```diff\n"
             "+ Verandering: +5.20%\n"
-            "+ Oude Koers:  € 309.12\n"
+            "+ Oude Koers:   € 309.12\n"
             "+ Nieuwe Koers: € 325.20\n"
             "```"
         ),
@@ -823,7 +957,7 @@ async def test_alert_cmd(ctx: commands.Context) -> None:
     )
     spike_embed.add_field(
         name="📊 Markt Details",
-        value="• **Drempelwaarde:** `±2.0%`\n• **Status:** Actieve markt-uitbraak",
+        value="• **Drempelwaarde:** `±2.0%`\n**Status:** Actieve markt-uitbraak",
         inline=False,
     )
     spike_embed.set_footer(text="StockWatcher Real-Time Scanner • Trading Alert")
@@ -861,8 +995,16 @@ async def test_alert_cmd(ctx: commands.Context) -> None:
     )
     warning_embed.set_footer(text="Reageer met een emoji op dit bericht om alerts voor 3 uur te pauzeren • StockWatcher Engine")
 
+    test_view = TradeActionView(
+        ticker="VWCE.DE",
+        action_text="BUY 🟢",
+        suggested_shares=0.2211,
+        price=170.00,
+        stop_loss=98.00
+    )
+
     await target_channel.send(embed=spike_embed)
-    await target_channel.send(embed=warning_embed)
+    await target_channel.send(embed=warning_embed, view=test_view)
 
     if target_channel.id != ctx.channel.id:
         await ctx.send(f"✅ Grote test alerts succesvol verzonden naar <#{target_channel.id}>!")
@@ -886,7 +1028,6 @@ class CLIContext:
 
     @asynccontextmanager
     async def typing(self) -> AsyncGenerator[None, None]:
-        # Cleanly yields an empty async context for CLI commands
         yield
 
 

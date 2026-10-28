@@ -150,6 +150,7 @@ def _calculate_atr(
 
 def init_db() -> None:
     with _connect() as conn:
+        # Bestaande alert_history tabel
         conn.execute("""
             CREATE TABLE IF NOT EXISTS alert_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +167,22 @@ def init_db() -> None:
             )
         """)
 
+        # Nieuwe tabel voor actieve posities van gebruikers die een signaal volgen
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS active_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                ticker TEXT,
+                shares REAL,
+                entry_price REAL,
+                stop_loss REAL,
+                peak_price REAL,
+                status TEXT DEFAULT 'OPEN',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Migratie check voor alert_history kolommen
         existing = {
             row["name"]
             for row in conn.execute(
@@ -188,20 +205,23 @@ def init_db() -> None:
                     f"ADD COLUMN {column} {definition}"
                 )
 
-
 init_db()
 
 
 
 def log_alert(
     ticker: str,
-    signal_type: str,
-    action: str,
-    price: float,
+    signal_type: str = None,
+    action: str = "HOLD",
+    price: float = 0.0,
     atr: float | None = None,
+    warning: str = None,
 ) -> None:
     """Record an alert with its entry price and ATR."""
     timestamp = datetime.now(timezone.utc)
+    
+    # Ondersteun zowel 'signal_type' als 'warning' als keyword argument
+    actual_signal_type = signal_type or warning or "UNKNOWN"
 
     try:
         price = float(price)
@@ -210,14 +230,12 @@ def log_alert(
 
         evaluation_price = _to_history_currency(price, ticker)
 
-        # Calculate ATR from daily history so its currency matches
-        # the historical closing prices used for evaluation.
-        atr = _calculate_atr(ticker, timestamp)
+        atr_val = _calculate_atr(ticker, timestamp) if atr is None else atr
 
-        if atr is not None:
-            atr = float(atr)
-            if atr <= 0:
-                atr = None
+        if atr_val is not None:
+            atr_val = float(atr_val)
+            if atr_val <= 0:
+                atr_val = None
 
     except (TypeError, ValueError) as exc:
         print(f"[Tracker Log Error] {ticker}: {exc}")
@@ -238,11 +256,11 @@ def log_alert(
         """, (
             timestamp.isoformat(),
             ticker,
-            signal_type,
+            actual_signal_type,
             action,
             price,
             evaluation_price,
-            atr,
+            atr_val,
         ))
 
 
@@ -394,38 +412,50 @@ def update_alert_outcomes() -> None:
 def get_accuracy_stats(
     signal_type: str = None,
     horizon: str = "1d",
+    warning: str = None,
 ) -> dict:
     """Return measured accuracy for a specific evaluation horizon."""
     if horizon not in {"1d", "3d", "7d"}:
         raise ValueError("horizon must be '1d', '3d' or '7d'.")
 
+    actual_signal_type = signal_type or warning
     winner_column = f"is_winner_{horizon}"
 
-    query = (
-        f"SELECT {winner_column} FROM alert_history "
-        f"WHERE {winner_column} IS NOT NULL"
-    )
-    params = ()
-
-    if signal_type:
-        query += " AND signal_type = ?"
-        params = (signal_type,)
-
     with _connect() as conn:
-        results = [
-            row[0]
-            for row in conn.execute(query, params).fetchall()
-        ]
+        # Haal het totaal aantal gelogde alerts op voor dit signaaltype
+        if actual_signal_type:
+            total_logged = conn.execute(
+                "SELECT COUNT(*) FROM alert_history WHERE signal_type = ?",
+                (actual_signal_type,)
+            ).fetchone()[0]
+            
+            evaluated_rows = [
+                row[0] for row in conn.execute(
+                    f"SELECT {winner_column} FROM alert_history WHERE signal_type = ? AND {winner_column} IS NOT NULL",
+                    (actual_signal_type,)
+                ).fetchall()
+            ]
+        else:
+            total_logged = conn.execute(
+                "SELECT COUNT(*) FROM alert_history"
+            ).fetchone()[0]
+            
+            evaluated_rows = [
+                row[0] for row in conn.execute(
+                    f"SELECT {winner_column} FROM alert_history WHERE {winner_column} IS NOT NULL"
+                ).fetchall()
+            ]
 
-    total = len(results)
-    wins = sum(results)
+    evaluated_count = len(evaluated_rows)
+    wins = sum(evaluated_rows)
 
     return {
         "horizon": horizon,
-        "win_rate": wins / total if total else 0.0,
-        "total": total,
+        "win_rate": wins / evaluated_count if evaluated_count else 0.0,
+        "total": total_logged,  # Totaal geregistreerde alerts (sluit aan op de assert)
+        "evaluated": evaluated_count,
         "wins": wins,
-        "accuracy_pct": wins / total * 100.0 if total else None,
+        "accuracy_pct": (wins / evaluated_count * 100.0) if evaluated_count else None,
     }
 
 def _is_european_ticker(ticker: str) -> bool:
@@ -442,3 +472,88 @@ def _to_history_currency(price: float, ticker: str) -> float:
         return float(price)
 
     return float(price) * data.get_usd_eur()
+
+def monitor_active_trades() -> list:
+    """
+    Controleert alle openstaande trades in 'active_trades'.
+    Vergelijkt de live koers met stop-loss en piekkoers.
+    Retourneert een lijst met actie-meldingen die naar Discord gestuurd moeten worden.
+    """
+    notifications = []
+    
+    with _connect() as conn:
+        cursor = conn.cursor()
+        trades = cursor.execute(
+            "SELECT id, user_id, ticker, shares, entry_price, stop_loss, peak_price FROM active_trades WHERE status = 'OPEN'"
+        ).fetchall()
+        
+        for trade in trades:
+            trade_id, user_id, ticker, shares, entry_price, stop_loss, peak_price = trade
+            
+            try:
+                # Gebruik de globale data module (zodat monkeypatch in tests werkt)
+                quote = data.get_finnhub_quote(ticker)
+                current_price = quote["price"]
+                
+                if peak_price is None or peak_price < entry_price:
+                    peak_price = entry_price
+                
+                # 1. Update de piekprijs als de huidige koers hoger is
+                if current_price > peak_price:
+                    peak_price = current_price
+                    cursor.execute(
+                        "UPDATE active_trades SET peak_price = ? WHERE id = ?",
+                        (peak_price, trade_id)
+                    )
+                
+                # 2. Check of de Stop-Loss is geraakt
+                if current_price <= stop_loss:
+                    cursor.execute(
+                        "UPDATE active_trades SET status = 'CLOSED_STOP_LOSS' WHERE id = ?",
+                        (trade_id,)
+                    )
+                    pl_eur = (current_price - entry_price) * shares
+                    pl_pct = ((current_price - entry_price) / entry_price) * 100.0
+                    notifications.append({
+                        "type": "STOP_LOSS",
+                        "user_id": user_id,
+                        "ticker": ticker,
+                        "message": (
+                            f"🚨 **STOP-LOSS GERAAKT!**\n"
+                            f"• **Asset:** `{ticker}`\n"
+                            f"• **Huidige Koers:** `€ {current_price:.2f}` (Stop-loss was: `€ {stop_loss:.2f}`)\n"
+                            f"• **Resultaat:** `€ {pl_eur:+.2f}` (`{pl_pct:+.2f}%`)\n"
+                            f"👉 *Verkoop je positie direct om verdere daling te voorkomen!*"
+                        )
+                    })
+                    continue
+                
+                # 3. Check voor Winst Pakken (Trailing Drop vanaf de piek)
+                gain_from_entry = ((current_price - entry_price) / entry_price) * 100.0
+                drop_from_peak = ((peak_price - current_price) / peak_price) * 100.0
+                
+                if gain_from_entry > 1.5 and drop_from_peak >= 2.0:
+                    cursor.execute(
+                        "UPDATE active_trades SET status = 'CLOSED_TAKE_PROFIT' WHERE id = ?",
+                        (trade_id,)
+                    )
+                    pl_eur = (current_price - entry_price) * shares
+                    notifications.append({
+                        "type": "TAKE_PROFIT",
+                        "user_id": user_id,
+                        "ticker": ticker,
+                        "message": (
+                            f"🎯 **WINST PAKKEN / TRENDOMSLAG DETECTIE!**\n"
+                            f"• **Asset:** `{ticker}`\n"
+                            f"• **Piekkoers was:** `€ {peak_price:.2f}` | **Nu:** `€ {current_price:.2f}`\n"
+                            f"• **Gerealiseerde winst:** `€ {pl_eur:+.2f}` (`{gain_from_entry:+.2f}%` vanaf instap)\n"
+                            f"👉 *De koers trekt terug vanaf de piek. Overweeg je winst veilig te stellen!*"
+                        )
+                    })
+                    
+            except Exception as e:
+                print(f"[Trade Monitor Error] {ticker}: {e}")
+                
+        conn.commit()
+        
+    return notifications
